@@ -1,0 +1,40 @@
+<script lang="ts">
+	import { goto } from '$app/navigation';
+	import { page } from '$app/state';
+	import Breadcrumb from '$lib/components/game/Breadcrumb.svelte';
+	import BattleView from '$lib/components/game/battle/BattleView.svelte';
+	import { getGameContext } from '$lib/services/GameContext';
+
+	const { game, universe, gotoBattle } = getGameContext();
+	let num = parseInt(page.params.num || '0');
+
+	let battle = $derived($universe.getBattle(num));
+
+	function gotoTarget() {
+		if (!battle) {
+			return;
+		}
+		gotoBattle(battle.num);
+		goto(`/games/${$game.id}`);
+	}
+</script>
+
+{#if battle}
+	<Breadcrumb>
+		{#snippet crumbs()}
+			<li><a class="cs-link" href={`/games/${$game.id}/battles`}>Battles</a></li>
+			<li class="flex flex-row gap-1">
+				{$universe.getBattleLocation(battle)}
+				<button
+					onclick={gotoTarget}
+					class="btn btn-outline btn-sm normal-case btn-secondary p-2"
+					title="goto">Goto</button
+				>
+			</li>
+		{/snippet}
+	</Breadcrumb>
+
+	<div class="grow px-1">
+		<BattleView playerFinder={$universe} designFinder={$universe} battleRecord={battle} />
+	</div>
+{/if}

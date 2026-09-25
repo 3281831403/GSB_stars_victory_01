@@ -1,0 +1,60 @@
+<script lang="ts">
+	import CheckboxInput from '$lib/components/CheckboxInput.svelte';
+	import EnumSelect from '$lib/components/EnumSelect.svelte';
+	import TextInput from '$lib/components/TextInput.svelte';
+	import {
+		Density,
+		GameStartMode,
+		PlayerPositions,
+		Size,
+		type GameSettings
+	} from '$lib/types/cs-proto';
+	import { GameStartModeFullNames } from '$lib/types/Enums';
+	import PrivateGameLink from './PrivateGameLink.svelte';
+
+	type Props = {
+		settings: GameSettings;
+		showInviteLink?: boolean;
+	};
+
+	let { settings = $bindable(), showInviteLink = false }: Props = $props();
+</script>
+
+<div class="flex flex-row flex-wrap">
+	{#if showInviteLink && !settings.public}
+		<PrivateGameLink />
+	{/if}
+	<TextInput name="name" bind:value={settings.name} />
+	<EnumSelect name="size" enumType={Size} bind:value={settings.size} />
+	<EnumSelect name="density" enumType={Density} bind:value={settings.density} />
+	<EnumSelect
+		name="playerPositions"
+		enumType={PlayerPositions}
+		bind:value={settings.playerPositions}
+	/>
+	<CheckboxInput name="public" bind:checked={settings.public} />
+	<CheckboxInput name="randomEvents" bind:checked={settings.randomEvents} />
+	<CheckboxInput name="publicPlayerScores" bind:checked={settings.publicPlayerScores} />
+	<CheckboxInput
+		title="Beginner: Max Minerals"
+		name="maxMinerals"
+		bind:checked={settings.maxMinerals}
+	/>
+	<CheckboxInput
+		name="computerPlayersFormAlliances"
+		bind:checked={settings.computerPlayersFormAlliances}
+	/>
+	<CheckboxInput
+		title="Galaxy Clumping"
+		name="galaxyClumping"
+		bind:checked={settings.galaxyClumping}
+	/>
+	<EnumSelect
+		name="startMode"
+		enumType={GameStartMode}
+		bind:value={settings.startMode}
+		typeTitle={(t) => GameStartModeFullNames[t]}
+		showEmpty={true}
+		tooltip="Setting mode to Max will create a game with maxed tech levels, minerals, etc."
+	/>
+</div>

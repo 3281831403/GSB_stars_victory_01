@@ -1,0 +1,322 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer components {
+	.bg-primary-focus {
+		@apply bg-[color-mix(in_oklab,oklch(var(--p)),black_7%)];
+	}
+	.stroke-primary-focus {
+		@apply stroke-[color-mix(in_oklab,oklch(var(--p)),black_7%)];
+	}
+	.bg-neutral-focus {
+		@apply bg-[color-mix(in_oklab,oklch(var(--n)),black_7%)];
+	}
+	.text-secondary-focus {
+		@apply text-[color-mix(in_oklab,oklch(var(--s)),black_7%)];
+	}
+
+	.btn {
+		@apply touch-manipulation rounded-none;
+	}
+	.cs-link {
+		@apply text-primary hover:text-accent;
+	}
+	.card-body {
+		@apply text-base;
+	}
+	.text-habitable {
+		@apply text-[#058405] dark:text-[#00FF00] font-bold;
+	}
+	.text-uninhabitable {
+		@apply text-[#FF0000] font-bold;
+	}
+	.text-terraformable {
+		@apply text-[#FEFF00] font-bold;
+	}
+	.text-fuel {
+		@apply text-[#FF0000];
+	}
+	.text-ironium {
+		@apply text-[#0960ff] font-semibold;
+	}
+	.text-boranium {
+		@apply text-[#08810a] font-semibold;
+	}
+	.text-germanium {
+		@apply text-[#FDFD06] font-semibold;
+	}
+	.text-tile-item-title {
+		@apply font-semibold;
+	}
+	.ironium-bar {
+		@apply bg-[#0900ff] fill-[#0900ff];
+	}
+	.boranium-bar {
+		@apply bg-[#00ff00] fill-[#00ff00];
+	}
+	.germanium-bar {
+		@apply bg-[#ffff00] fill-[#ffff00];
+	}
+	.colonists-bar {
+		@apply bg-[#ffffff];
+	}
+	.ironium-concentration {
+		@apply fill-[#020085] stroke-[#cccccc];
+	}
+	.boranium-concentration {
+		@apply fill-[#008100] stroke-[#cccccc];
+	}
+	.germanium-concentration {
+		@apply fill-[#7f7f00] stroke-[#cccccc];
+	}
+	.damage-bar {
+		@apply bg-[#FF0000];
+	}
+	.fuel-bar {
+		@apply bg-[#FF0000];
+	}
+	.warp-bar {
+		@apply bg-[#FF0000];
+	}
+	.warp-danger-bar {
+		@apply bg-[#FF0000];
+	}
+	.warp-warn-bar {
+		@apply bg-[#FFFF00];
+	}
+	.warp-stargate-bar {
+		@apply bg-[#FFFF00];
+	}
+	.warp-packet-bar {
+		@apply bg-[#8F0087];
+	}
+
+	.grav-bar {
+		@apply fill-[#500fff] bg-[#500fff];
+	}
+	.temp-bar {
+		@apply fill-[#D60000] bg-[#D60000];
+	}
+	.rad-bar {
+		@apply fill-[#00C200] bg-[#00C200];
+	}
+
+	.dark {
+		.grav-bar {
+			@apply fill-[#020085] bg-[#020085];
+		}
+		.temp-bar {
+			@apply fill-[#8B0000] bg-[#8B0000];
+		}
+		.rad-bar {
+			@apply fill-[#008100] bg-[#008100];
+		}
+	}
+
+	.grav-point {
+		@apply stroke-[#0900FF] fill-none;
+	}
+	.temp-point {
+		@apply stroke-[#FF0000] fill-none;
+	}
+	.rad-point {
+		@apply stroke-[#00FF00] fill-none;
+	}
+	.scanner {
+		@apply fill-[#8B0000];
+	}
+	.scanner-pen {
+		@apply fill-[#7F7F00];
+	}
+
+	.text-queue-item-skipped {
+		@apply text-secondary;
+	}
+
+	.text-queue-item-never {
+		@apply text-error;
+	}
+
+	.text-queue-item-this-year {
+		@apply text-[#08810a];
+	}
+
+	.text-queue-item-next-year {
+		@apply text-[#0960ff];
+	}
+
+	.fill-ally-selected {
+		@apply fill-[#FDFD06] dark:fill-[#ffff00];
+	}
+
+	.fill-ally-current {
+		@apply fill-gray-500;
+	}
+
+	.fill-mystery-trader {
+		@apply fill-[#00FFFF];
+	}
+
+	.text-mystery-trader {
+		@apply text-[#00FFFF];
+	}
+
+	.stroke-orbit {
+		@apply stroke-[#FFFFFF];
+	}
+	.stroke-orbit-enemies {
+		@apply stroke-[#FF0000];
+	}
+	.stroke-orbit-friends-and-enemies {
+		@apply stroke-[#FF00FF];
+	}
+	.stroke-orbit-friends {
+		@apply stroke-[#FFFF00];
+	}
+
+	.fill-orbit {
+		@apply fill-[#FFFFFF];
+	}
+	.fill-orbit-enemies {
+		@apply fill-[#FF0000];
+	}
+	.fill-orbit-friends-and-enemies {
+		@apply fill-[#eb2eeb];
+	}
+	.fill-orbit-friends {
+		@apply fill-[#FFFF00];
+	}
+
+	.fill-fleet-owned {
+		@apply fill-[#0000FF];
+	}
+	.fill-fleet-neutral {
+		@apply fill-base-content;
+	}
+	.fill-fleet-enemy {
+		@apply fill-[#FF0000];
+	}
+	.fill-fleet-ally {
+		@apply fill-[#FFFF00];
+	}
+
+	.mapobject-avatar-wrapper {
+		@apply border-2 border-neutral mr-2 p-2 bg-black w-[85px] h-[85px];
+	}
+
+	.mapobject-avatar {
+		@apply bg-black h-[65px] w-[65px];
+	}
+}
+
+.scanner-wormhole {
+	fill: #8a2be2;
+}
+
+.wormhole-link {
+	fill: none;
+	stroke: #8a2be2;
+	stroke-linecap: round;
+}
+
+.show-location-line {
+	fill: none;
+	stroke: #ffffff;
+	stroke-linecap: round;
+	stroke-width: 2;
+}
+
+.waypoint-line {
+	fill: none;
+	stroke-linejoin: round;
+	stroke-linecap: round;
+	stroke: #0900ff;
+}
+
+.waypoint-line-commanded {
+	fill: none;
+	stroke-linejoin: round;
+	stroke-linecap: round;
+	stroke: #8480ff;
+}
+
+.waypoint-line-selected {
+	fill: none;
+	stroke-linejoin: round;
+	stroke-linecap: round;
+	stroke: #9d9afc;
+}
+
+.packet-dest-line {
+	fill: none;
+	stroke-linecap: square;
+	stroke: #6b0065;
+}
+
+.packet-arrow {
+	fill: #6b0065;
+}
+
+.route-line {
+	fill: none;
+	stroke-linecap: square;
+	stroke: #fdfd00;
+}
+
+.route-arrow {
+	fill: #fdfd00;
+}
+
+.warpline-arrow {
+	fill: none;
+}
+
+.beam-line {
+	fill: none;
+	stroke-linejoin: round;
+	stroke-linecap: round;
+	stroke-width: 3px;
+	stroke: #ff0000;
+}
+
+.fleet-commanded {
+	fill: '#FFFF00' !important;
+}
+
+.starbase {
+	fill: #fdfd00;
+	stroke: #7f7f00;
+	stroke-width: 0.5;
+}
+
+.starbase-fort {
+	fill: #00007f;
+	stroke: #00002f;
+	stroke-width: 0.5;
+}
+
+.stargate {
+	fill: #008100;
+	stroke: #005c00;
+	stroke-width: 0.5;
+}
+
+.massdriver {
+	fill: #8d0085;
+	stroke: #6b0065;
+	stroke-width: 0.5;
+}
+
+.dark {
+	color-scheme: dark;
+}
+
+.light {
+	color-scheme: light;
+}
+
+/* daisyui is setting this to z-index to 11 for some reason... */
+.table th:first-child {
+	z-index: 0;
+}

@@ -1,0 +1,196 @@
+<script lang="ts">
+	import { clickOutside } from '$lib/clickOutside';
+	import AddWaypoint from '$lib/components/icons/AddWaypoint.svelte';
+	import AddWaypointFast from '$lib/components/icons/AddWaypointFast.svelte';
+	import Habitability from '$lib/components/icons/Habitability.svelte';
+	import MineralConcentration from '$lib/components/icons/MineralConcentration.svelte';
+	import PlanetWithStarbase from '$lib/components/icons/PlanetWithStarbase.svelte';
+	import Population from '$lib/components/icons/Population.svelte';
+	import SurfaceMinerals from '$lib/components/icons/SurfaceMinerals.svelte';
+	import type { NextPrevMapObjectProps } from '$lib/services/Events';
+	import { getGameContext } from '$lib/services/GameContext';
+	import { clamp } from '$lib/services/Math';
+	import { PlanetViewState } from '$lib/types/PlayerSettings';
+	import {
+		ArrowLongLeft,
+		ArrowLongRight,
+		ArrowPath,
+		Envelope,
+		MagnifyingGlass
+	} from '@steeze-ui/heroicons';
+	import { Icon } from '@steeze-ui/svelte-icon';
+	import MessagesPane from '../MessagesPane.svelte';
+	import MobileViewSettings from './toolbar/MobileViewSettings.svelte';
+	import PlanetViewStates from './toolbar/PlanetViewStates.svelte';
+	import ScannerToolbarFilter from './toolbar/ScannerToolbarFilter.svelte';
+
+	const { player, settings } = getGameContext();
+
+	type Props = {
+		onShowSearch: () => void;
+		onCycleMapObject: () => void;
+	} & NextPrevMapObjectProps;
+	let { onShowSearch, onNextMapObject, onPreviousMapObject, onCycleMapObject }: Props = $props();
+
+	let planetsViewMenuDropdown: HTMLDetailsElement | undefined = $state();
+
+	function closePlanetsMenu() {
+		planetsViewMenuDropdown?.removeAttribute('open');
+	}
+
+	// close the planets menu when we switch views (but leave the filter menu open so we can filter more than one thing)
+	settings.subscribe(closePlanetsMenu);
+</script>
+
+<div class="flex-initial navbar bg-base-200 py-0 my-0 min-h-0">
+	<div class="flex-none hidden lg:block">
+		<PlanetViewStates class="menu menu-horizontal" />
+	</div>
+	<div class="flex-none hidden lg:block">
+		<ScannerToolbarFilter class="menu menu-horizontal" />
+	</div>
+	<div class="flex-none block lg:hidden">
+		<ul class="menu menu-horizontal">
+			<!-- submenu -->
+			<li>
+				<details bind:this={planetsViewMenuDropdown} use:clickOutside={closePlanetsMenu}>
+					<summary class="p-0">
+						<a
+							href="#planet-view-states"
+							class="btn btn-xs w-12 h-12"
+							onclick={(e) => {
+								e.preventDefault();
+								planetsViewMenuDropdown?.toggleAttribute('open');
+							}}
+						>
+							{#if $settings.planetViewState == PlanetViewState.Normal}
+								<PlanetWithStarbase class="w-6 h-6" />
+							{:else if $settings.planetViewState == PlanetViewState.SurfaceMinerals}
+								<SurfaceMinerals class="w-6 h-6" />
+							{:else if $settings.planetViewState == PlanetViewState.MineralConcentration}
+								<MineralConcentration class="w-6 h-6" />
+							{:else if $settings.planetViewState == PlanetViewState.Percent}
+								<Habitability class="w-6 h-6" />
+							{:else if $settings.planetViewState == PlanetViewState.Population}
+								<Population class="w-6 h-6" />
+							{:else}
+								<PlanetWithStarbase class="w-6 h-6" />
+							{/if}
+						</a>
+					</summary>
+					<ul class="bg-base-200 z-20 p-1 w-64">
+						<li>
+							<MobileViewSettings />
+						</li>
+					</ul>
+				</details>
+			</li>
+		</ul>
+	</div>
+
+	<div class="flex-none">
+		<ul class="menu menu-horizontal">
+			<li class="hidden lg:block">
+				<div class="w-full px-1">
+					<input
+						class="input input-sm input-bordered w-16 pr-0 pl-1"
+						type="number"
+						min={0}
+						max={100}
+						step={10}
+						value={$settings.scannerPercent}
+						onchange={(e) => {
+							const val = parseInt(e.currentTarget.value);
+							if (val) {
+								$settings.scannerPercent = clamp(val, 0, 100);
+								e.currentTarget.value = `${$settings.scannerPercent}`;
+							} else {
+								$settings.scannerPercent = 0;
+								e.currentTarget.value = '0';
+							}
+						}}
+					/>
+				</div>
+			</li>
+			<li>
+				<a
+					href="#add-waypoint"
+					id="add-waypoint"
+					class:fill-accent={$settings.addWaypoint}
+					class:fill-current={!$settings.addWaypoint}
+					class="btn btn-ghost btn-xs h-full border"
+					onclick={(e) => {
+						e.preventDefault();
+						// 3 state toggle
+						if ($settings.addWaypoint && $settings.fastestWaypoint) {
+							$settings.addWaypoint = $settings.fastestWaypoint = false;
+						} else if ($settings.addWaypoint && !$settings.fastestWaypoint) {
+							$settings.addWaypoint = true;
+							$settings.fastestWaypoint = true;
+						} else if (!$settings.addWaypoint && !$settings.fastestWaypoint) {
+							$settings.addWaypoint = true;
+							$settings.fastestWaypoint = false;
+						} else {
+							// weird state, reset
+							$settings.addWaypoint = $settings.fastestWaypoint = false;
+						}
+					}}
+				>
+					{#if $settings.fastestWaypoint}
+						<AddWaypointFast class="w-6 h-6" />
+					{:else}
+						<AddWaypoint class="w-6 h-6" />
+					{/if}
+				</a>
+			</li>
+
+			<li>
+				<a
+					href="#messages"
+					class="btn btn-ghost btn-xs h-full indicator"
+					onclick={(e) => {
+						e.preventDefault();
+						$settings.showMessagePane = !$settings.showMessagePane;
+					}}
+					><Icon
+						src={Envelope}
+						class={`w-6 h-6 ${$settings.showMessagePane ? 'stroke-accent' : 'stroke-current'}`}
+					/>
+					<span class="indicator-item badge badge-secondary">{$player.messages.length}</span>
+				</a>
+			</li>
+		</ul>
+	</div>
+
+	<div class="ml-auto">
+		<button
+			onclick={onShowSearch}
+			class="btn btn-outline btn-sm normal-case btn-secondary"
+			title="search"
+			><Icon src={MagnifyingGlass} size="16" class="hover:stroke-accent inline" /></button
+		>
+		<button
+			onclick={onCycleMapObject}
+			class="md:hidden btn btn-outline btn-sm normal-case btn-secondary"
+			title="cycle"><Icon src={ArrowPath} size="16" class="hover:stroke-accent inline" /></button
+		>
+
+		<div class="tooltip" data-tip="previous">
+			<button
+				onclick={onPreviousMapObject}
+				class="btn btn-outline btn-sm normal-case btn-secondary"
+				title="previous"
+				><Icon src={ArrowLongLeft} size="16" class="hover:stroke-accent inline" /></button
+			>
+		</div>
+		<div class="tooltip" data-tip="next">
+			<button
+				onclick={onNextMapObject}
+				class="btn btn-outline btn-sm normal-case btn-secondary"
+				title="next"
+				><Icon src={ArrowLongRight} size="16" class="hover:stroke-accent inline" /></button
+			>
+		</div>
+	</div>
+</div>
+<MessagesPane bind:showMessages={$settings.showMessagePane} messages={$player.messages} />

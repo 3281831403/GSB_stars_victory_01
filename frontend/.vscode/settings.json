@@ -1,0 +1,7 @@
+{
+	"files.exclude": {
+		"node_modules": true
+	},
+	"eslint.lintTask.enable": false, // we have our own task lol
+	"eslint.validate": ["javascript", "typescript", "svelte"]
+}

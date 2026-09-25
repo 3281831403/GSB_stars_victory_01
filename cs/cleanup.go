@@ -1,0 +1,147 @@
+package cs
+
+import (
+	"fmt"
+	"log/slog"
+)
+
+/*
+Because the game is actively running, bugs are introduced and we need to fix them as
+we go. For example, a bug was introduced to "discover" player starbase designs leading
+to duplciate designs on the UI.
+
+This file will hold cleanup functions for cleaning up this sort of data on the game
+*/
+
+type Cleaner interface {
+	RemovePlayerDesignIntels(game *FullGame)
+	AddScannerToInnateScannerPlanets(game *FullGame)
+	AddRandomArtifactsToPlanets(game *FullGame)
+	ResetHomeworldBaseHab(game *FullGame)
+	FixMineralConc(game *FullGame)
+}
+
+type cleanup struct {
+}
+
+func NewCleaner() Cleaner {
+	return &cleanup{}
+}
+
+// cleanup design intels owned by the player
+func (c *cleanup) RemovePlayerDesignIntels(game *FullGame) {
+	for _, player := range game.Players {
+		designIntels := make([]*ShipDesign, 0, len(player.ShipDesignIntels))
+		for _, design := range player.ShipDesignIntels {
+			if design.PlayerNum != player.Num {
+				designIntels = append(designIntels, design)
+			} else {
+				slog.Info("cleanup: removing design intel",
+					slog.Int64("GameID", game.ID),
+					slog.String("Name", game.Name),
+					slog.String("message", fmt.Sprintf("cleanup: removing design intel for player %d's %s design", player.Num, design.Name)))
+			}
+		}
+		player.ShipDesignIntels = designIntels
+	}
+}
+
+// ensure AR planets have scanners
+func (c *cleanup) AddScannerToInnateScannerPlanets(game *FullGame) {
+	for _, planet := range game.Planets {
+		if !planet.Owned() {
+			continue
+		}
+
+		player := game.getPlayer(planet.PlayerNum)
+		if !player.Race.Spec.InnateScanner {
+			continue
+		}
+
+		planet.Scanner = true
+		planet.MarkDirty()
+		slog.Info("cleanup: setting scanner to true",
+			slog.Int64("GameID", game.ID),
+			slog.String("Name", game.Name),
+			slog.String("message", fmt.Sprintf("cleanup: setting scanner to true for player %d's %s planet", player.Num, planet.Name)))
+	}
+}
+
+// we support random artifacts now, yay! upgrade our existing games
+func (c *cleanup) AddRandomArtifactsToPlanets(game *FullGame) {
+	if !game.RandomEvents {
+		return
+	}
+
+	for _, planet := range game.Planets {
+		if planet.Owned() {
+			continue
+		}
+
+		// check if this planet should have a random artifact
+		if game.Rules.RandomEventChances[RandomEventAncientArtifact] > game.Rules.random.Float64() {
+			planet.RandomArtifact = true
+			planet.MarkDirty()
+
+			slog.Info("cleanup: added random artifact",
+				slog.Int64("GameID", game.ID),
+				slog.String("Name", game.Name),
+				slog.String("message", fmt.Sprintf("cleanup: added random artifact to planet %s", planet.Name)))
+		}
+	}
+}
+
+func (c *cleanup) ResetHomeworldBaseHab(game *FullGame) {
+	for _, planet := range game.Planets {
+		if !planet.Homeworld {
+			continue
+		}
+
+		// these are homeworlds. hopefully they haven't been hit by a comet
+		// and re-terraformed...
+		prevHab := planet.BaseHab
+		planet.BaseHab = planet.Hab
+
+		planet.MarkDirty()
+		slog.Info("cleanup: reset BaseHab on homeworld",
+			slog.Int64("GameID", game.ID),
+			slog.String("Name", game.Name),
+			slog.String("message", fmt.Sprintf("cleanup: reset BaseHab on homeworld %s from %s to %s", planet.Name, prevHab, planet.BaseHab)))
+	}
+}
+
+func (c *cleanup) FixMineralConc(game *FullGame) {
+	rules := NewRules()
+	minMinConc := rules.MinStartingMineralConcentration
+	for _, planet := range game.Planets {
+
+		// homeworlds are fine...
+		if planet.Homeworld {
+			continue
+		}
+
+		// this planet
+		if planet.MineralConcentration.Ironium < minMinConc ||
+			planet.MineralConcentration.Boranium < minMinConc ||
+			planet.MineralConcentration.Germanium < minMinConc {
+
+			prevMinConc := planet.MineralConcentration
+			if planet.MineralConcentration.Ironium < minMinConc {
+				planet.MineralConcentration.Ironium += minMinConc
+			}
+			if planet.MineralConcentration.Boranium < minMinConc {
+				planet.MineralConcentration.Boranium += minMinConc
+			}
+			if planet.MineralConcentration.Germanium < minMinConc {
+				planet.MineralConcentration.Germanium += minMinConc
+			}
+
+			planet.MarkDirty()
+			slog.Info("cleanup: reset MineralConcentration",
+				slog.Int64("GameID", game.ID),
+				slog.String("Name", game.Name),
+				slog.String("message", fmt.Sprintf("cleanup: reset MineralConcentration on planet %s from %s to %s", planet.Name, prevMinConc, planet.MineralConcentration)))
+		}
+
+	}
+}

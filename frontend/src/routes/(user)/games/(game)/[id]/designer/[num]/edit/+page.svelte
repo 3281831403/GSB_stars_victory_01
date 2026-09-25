@@ -1,0 +1,51 @@
+<script lang="ts">
+	import { goto } from '$app/navigation';
+	import { page } from '$app/state';
+	import Breadcrumb from '$lib/components/game/Breadcrumb.svelte';
+	import ShipDesigner from '$lib/components/game/design/ShipDesigner.svelte';
+	import { type ShipDesign } from '$lib/types/cs-proto';
+	import { addError } from '$lib/services/Errors';
+	import { getGameContext } from '$lib/services/GameContext';
+	import { techs } from '$lib/services/Stores';
+	import type { ConnectError } from '@connectrpc/connect';
+
+	const { game, universe, updateDesign } = getGameContext();
+	let num = parseInt(page.params.num || '0');
+
+	let design: ShipDesign | undefined = $state($universe.getMyDesign(num));
+	let hull = $derived(design && $techs.getHull(design.hull));
+	let error = $state('');
+
+	async function save() {
+		error = '';
+
+		try {
+			if (design) {
+				const { valid } = $universe.validateDesign(design);
+				if (valid) {
+					// update this design
+					design = await updateDesign(design);
+					goto(`/games/${$game.id}/designer/${design.num}`);
+				}
+			}
+		} catch (err) {
+			addError(err as ConnectError);
+		}
+	}
+</script>
+
+{#if design && hull}
+	<Breadcrumb>
+		{#snippet crumbs()}
+			<li><a class="cs-link" href={`/games/${$game.id}/designer`}>Ship Designs</a></li>
+			<li>{design?.name === '' ? 'new' : design?.name}</li>
+		{/snippet}
+		{#snippet end()}
+			<div class="flex justify-end mb-1">
+				<button class="btn btn-success mx-1" type="submit" onclick={save}>Save</button>
+			</div>
+		{/snippet}
+	</Breadcrumb>
+
+	<ShipDesigner bind:design {hull} onSave={save} {error} />
+{/if}

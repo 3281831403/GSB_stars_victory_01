@@ -1,0 +1,37 @@
+{
+	"folders": [
+		{
+			"name": "root",
+			"path": "./"
+		},
+		{
+			"name": "frontend",
+			"path": "frontend"
+		}
+	],
+	"settings": {
+		"[json][jsonc][jsonl][js][ts][css][html][svelte]": {
+			"editor.defaultFormatter": "esbenp.prettier-vscode"
+		},
+		"files.associations": {
+			"*.css": "tailwindcss"
+		},
+		"testing.automaticallyOpenPeekView": "never",
+		"typescript.tsdk": "frontend/node_modules/typescript/lib",
+		"goStructTagAutogen.generation": {
+			"template": "json:\"{{camel}},omitempty\"",
+			"json": {
+				"cases": ["camel"],
+				"options": ["omitempty", "-"]
+			}
+		},
+		// stop VS Code from trying to mess with tasks
+		"task.autoDetect": "off",
+		"task.problemMatchers.neverPrompt": true,
+		"typescript.format.semicolons": "insert",
+		"typescript.preferences.preferTypeOnlyAutoImports": true,
+		"Prettier-SQL.keywordCase": "upper",
+		"Prettier-SQL.SQLFlavourOverride": "sqlite",
+		"Prettier-SQL.denseOperators": false
+	}
+}

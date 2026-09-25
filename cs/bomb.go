@@ -1,0 +1,386 @@
+package cs
+
+import (
+	"log/slog"
+	"math"
+)
+
+// Bombers orbiting enemy planets will Bomb planets, killing population and destroying installations.
+type Bomb struct {
+	Quantity             int     `json:"quantity,omitempty"`
+	KillRate             float64 `json:"killRate,omitempty"`
+	MinKillRate          int     `json:"minKillRate,omitempty"`
+	StructureDestroyRate float64 `json:"structureDestroyRate,omitempty"`
+	UnterraformRate      int     `json:"unterraformRate,omitempty"`
+}
+
+type BombingResult struct {
+	BomberName         string `json:"bomberName,omitempty"`
+	NumBombers         int    `json:"numBombers,omitempty"`
+	ColonistsKilled    int    `json:"colonistsKilled,omitempty"`
+	MinesDestroyed     int    `json:"minesDestroyed,omitempty"`
+	FactoriesDestroyed int    `json:"factoriesDestroyed,omitempty"`
+	DefensesDestroyed  int    `json:"defensesDestroyed,omitempty"`
+	UnterraformAmount  Hab    `json:"unterraformAmount,omitzero"`
+	PlanetEmptied      bool   `json:"planetEmptied,omitempty"`
+	fleet              *Fleet
+}
+
+type bomber struct {
+	rules *Rules
+	log   *slog.Logger
+}
+
+func newBomber(log *slog.Logger, rules *Rules) bomber {
+	return bomber{rules: rules, log: log}
+}
+
+// add two bombing results and return the total
+func (result BombingResult) Add(r BombingResult) BombingResult {
+	// keep the new one, if the source is empty
+	if result.NumBombers == 0 {
+		return r
+	}
+
+	return BombingResult{
+		NumBombers:         max(result.NumBombers, r.NumBombers), // we only care about the highest number of bombers for the result
+		ColonistsKilled:    result.ColonistsKilled + r.ColonistsKilled,
+		MinesDestroyed:     result.MinesDestroyed + r.MinesDestroyed,
+		FactoriesDestroyed: result.FactoriesDestroyed + r.FactoriesDestroyed,
+		DefensesDestroyed:  result.DefensesDestroyed + r.DefensesDestroyed,
+		UnterraformAmount:  result.UnterraformAmount.Add(r.UnterraformAmount),
+		PlanetEmptied:      result.PlanetEmptied || r.PlanetEmptied,
+		fleet:              result.fleet, // we only care about the first fleet
+	}
+}
+
+// bomb this planet if there are any bombers orbiting it.
+func (b *bomber) bombPlanet(planet *Planet, planetOwner *Player, enemyBombers []*Fleet, pg playerGetter) {
+	// get a list of all players orbiting the planet
+	orbitingPlayerNums := map[int]bool{}
+	resultsByPlayer := map[int]BombingResult{}
+	for _, fleet := range enemyBombers {
+		orbitingPlayerNums[fleet.PlayerNum] = true
+		resultsByPlayer[fleet.PlayerNum] = BombingResult{}
+	}
+
+	// bomb the planet with regular bombs
+	for playerNum := range orbitingPlayerNums {
+		result := b.normalBombPlanet(planet, planetOwner, pg.getPlayer(playerNum), b.getBombersForPlayer(enemyBombers, playerNum))
+		resultsByPlayer[playerNum] = resultsByPlayer[playerNum].Add(result)
+		// stop bombing if everyone is dead
+		if planet.GetPopulation() == 0 {
+			break
+		}
+	}
+
+	// bomb the planet with smart bombs
+	if planet.GetPopulation() > 0 {
+		for playerNum := range orbitingPlayerNums {
+			result := b.smartBombPlanet(planet, planetOwner, pg.getPlayer(playerNum), b.getBombersForPlayer(enemyBombers, playerNum))
+			resultsByPlayer[playerNum] = resultsByPlayer[playerNum].Add(result)
+
+			// stop bombing if everyone is dead
+			if planet.GetPopulation() == 0 {
+				break
+			}
+		}
+	}
+
+	// deterraform planets
+	if planet.GetPopulation() > 0 && planet.BaseHab != planet.Hab {
+		for playerNum := range orbitingPlayerNums {
+			result := b.retroBombPlanet(planet, planetOwner, pg.getPlayer(playerNum), b.getBombersForPlayer(enemyBombers, playerNum))
+			resultsByPlayer[playerNum] = resultsByPlayer[playerNum].Add(result)
+		}
+	}
+
+	for playerNum, result := range resultsByPlayer {
+		if result.NumBombers == 0 {
+			continue
+		}
+
+		attacker := pg.getPlayer(playerNum)
+
+		// let each player know a bombing happened
+		messager.fleetBombedPlanet(attacker, result.fleet, planet, result)
+		messager.planetBombed(planetOwner, planet, result.fleet, result)
+	}
+
+	// if, after bombing, the planet is all out of pop, empty it
+	if planet.GetPopulation() <= 0 {
+		planet.emptyPlanet()
+		messager.planetDiedOff(planetOwner, planet)
+	}
+}
+
+// get a slice of all bombers for a player
+func (b *bomber) getBombersForPlayer(fleets []*Fleet, playerNum int) []*Fleet {
+	result := []*Fleet{}
+	for _, fleet := range fleets {
+		if fleet.PlayerNum == playerNum {
+			result = append(result, fleet)
+		}
+	}
+	return result
+}
+
+// bomb this planet with a slice of fleets.
+func (b *bomber) normalBombPlanet(planet *Planet, defender *Player, attacker *Player, bombers []*Fleet) BombingResult {
+
+	// do all normal bombs
+	bombs := []Bomb{}
+	fleets := []*Fleet{}
+	for _, fleet := range bombers {
+		if len(fleet.Spec.Bombs) > 0 {
+			bombs = append(bombs, fleet.Spec.Bombs...)
+			fleets = append(fleets, fleet)
+		}
+	}
+
+	if len(bombs) == 0 {
+		return BombingResult{}
+	}
+
+	// figure out the killRate and minKillRate for this fleet's bombs
+	defenseCoverage := planet.Spec.DefenseCoverage
+	killRateColonistsKilled := roundTo100(b.getColonistsKilledForBombs(planet.GetPopulation(), defenseCoverage, bombs), math.Round)
+	minColonistsKilled := roundTo100(b.getMinColonistsKilledForBombs(defenseCoverage, bombs), math.Round)
+
+	killed := max(killRateColonistsKilled, minColonistsKilled)
+	planet.addPopulation(-killed)
+
+	// apply this against mines/factories and defenses proportionally
+	structuresDestroyed := b.getStructuresDestroyed(defenseCoverage, bombs)
+	totalStructures := planet.Mines + planet.Factories + planet.Defenses
+	leftoverMines := 0
+	leftoverFactories := 0
+	leftoverDefenses := 0
+	if totalStructures > 0 {
+		leftoverMines = max(0, int(float64(planet.Mines)-float64(structuresDestroyed)*float64(planet.Mines)/float64(totalStructures)))
+		leftoverFactories = max(0, int(float64(planet.Factories)-float64(structuresDestroyed)*float64(planet.Factories)/float64(totalStructures)))
+		leftoverDefenses = max(0, int(float64(planet.Defenses)-float64(structuresDestroyed)*float64(planet.Defenses)/float64(totalStructures)))
+	}
+
+	// make sure we only count stuctures that were actually destroyed
+	minesDestroyed := planet.Mines - leftoverMines
+	factoriesDestroyed := planet.Factories - leftoverFactories
+	defensesDestroyed := planet.Defenses - leftoverDefenses
+
+	planet.Mines = leftoverMines
+	planet.Factories = leftoverFactories
+	planet.Defenses = leftoverDefenses
+
+	// update planet spec
+	// TODO: Make sure this doesn't change def coverage
+	// defenses should only be lowered *after* all bombs from a given player
+	// have struck
+	planet.Spec = ComputePlanetSpec(b.rules, defender, planet)
+
+	b.log.Debug("fleet bombed planet",
+		slog.Int("Player", attacker.Num),
+		slog.String("Planet", planet.Name),
+		slog.String("Fleet", fleets[0].Name),
+		slog.Int("NumFleets", len(fleets)),
+		slog.Int("PlanetPlayer", planet.PlayerNum),
+		slog.Int("Killed", killed),
+		slog.Int("MinesDestroyed", minesDestroyed),
+		slog.Int("FactoriesDestroyed", factoriesDestroyed),
+		slog.Int("DefensesDestroyed", defensesDestroyed))
+
+	return BombingResult{
+		BomberName:         fleets[0].Name,
+		NumBombers:         len(fleets),
+		ColonistsKilled:    killed,
+		MinesDestroyed:     minesDestroyed,
+		FactoriesDestroyed: factoriesDestroyed,
+		DefensesDestroyed:  defensesDestroyed,
+		PlanetEmptied:      planet.Cargo.Colonists == 0,
+		fleet:              fleets[0],
+	}
+}
+
+// smartbomb the planet for each fleet
+func (b *bomber) smartBombPlanet(planet *Planet, defender *Player, attacker *Player, bombers []*Fleet) BombingResult {
+	smartDefenseCoverage := planet.Spec.DefenseCoverageSmart
+
+	// get all smart bombs from these fleets
+	bombs := []Bomb{}
+	fleets := []*Fleet{}
+	for _, fleet := range bombers {
+		if len(fleet.Spec.SmartBombs) > 0 {
+			bombs = append(bombs, fleet.Spec.SmartBombs...)
+			fleets = append(fleets, fleet)
+		}
+	}
+
+	if len(bombs) == 0 {
+		return BombingResult{}
+	}
+
+	// figure out the killRate and minKillRate for this fleet's bombs
+	// TODO: Check how this rounds
+	killRateColonistsKilled := roundTo100(b.getColonistsKilledWithSmartBombs(planet.GetPopulation(), smartDefenseCoverage, bombs), math.Round)
+	minColonistsKilled := roundTo100(b.getMinColonistsKilledForBombs(smartDefenseCoverage, bombs), math.Round)
+
+	killed := max(killRateColonistsKilled, minColonistsKilled)
+	planet.addPopulation(-killed)
+
+	// update planet spec
+	planet.Spec = ComputePlanetSpec(b.rules, defender, planet)
+
+	b.log.Debug("fleet smart bombed planet",
+		slog.Int("Player", attacker.Num),
+		slog.String("Planet", planet.Name),
+		slog.String("Fleet", fleets[0].Name),
+		slog.Int("NumFleets", len(fleets)),
+		slog.Int("PlanetPlayer", planet.PlayerNum),
+		slog.Int("killed", killed))
+
+	return BombingResult{
+		BomberName:      fleets[0].Name,
+		NumBombers:      len(fleets),
+		ColonistsKilled: killed,
+		PlanetEmptied:   planet.Cargo.Colonists == 0,
+		fleet:           fleets[0],
+	}
+}
+
+// retroBombPlanet a planet for each fleet
+func (b *bomber) retroBombPlanet(planet *Planet, defender *Player, attacker *Player, bombers []*Fleet) BombingResult {
+	// do all retro bombs
+	bombs := []Bomb{}
+	fleets := []*Fleet{}
+	for _, fleet := range bombers {
+		if len(fleet.Spec.RetroBombs) > 0 {
+			bombs = append(bombs, fleet.Spec.RetroBombs...)
+			fleets = append(fleets, fleet)
+		}
+	}
+
+	if len(bombs) == 0 {
+		return BombingResult{}
+	}
+
+	// sum up all the unterraforming
+	var retroBombAmount int
+	for _, bomb := range bombs {
+		retroBombAmount += bomb.UnterraformRate * bomb.Quantity
+	}
+	unterraformAmount := b.getUnterraformAmount(retroBombAmount, planet.BaseHab, planet.Hab)
+
+	if unterraformAmount.absSum() == 0 {
+		return BombingResult{}
+	}
+
+	// apply the unterraform amount
+	planet.Hab = planet.Hab.Add(unterraformAmount)
+	planet.TerraformedAmount = planet.TerraformedAmount.Add(unterraformAmount)
+
+	// update planet spec
+	planet.Spec = ComputePlanetSpec(b.rules, defender, planet)
+
+	b.log.Debug("fleet retro bombed planet",
+		slog.Int("Player", attacker.Num),
+		slog.Int("PlanetPlayer", planet.PlayerNum),
+		slog.String("Fleet", fleets[0].Name),
+		slog.Int("NumFleets", len(fleets)),
+		slog.String("UnterraformAmount", unterraformAmount.String()))
+
+	return BombingResult{
+		BomberName:        fleets[0].Name,
+		NumBombers:        len(fleets),
+		UnterraformAmount: unterraformAmount,
+		fleet:             fleets[0],
+	}
+}
+
+// getUnterraformAmount gets the amount we should unterraform with retro bombs
+func (b *bomber) getUnterraformAmount(retroBombAmount int, baseHab, hab Hab) Hab {
+	unterraformAmount := Hab{}
+	for i := 0; i < retroBombAmount; i++ {
+		// find the current diff based on the unterraforming we've done so far
+		habDiff := hab.Subtract(baseHab).Add(unterraformAmount)
+		if habDiff.absSum() > 0 {
+			largestTerraformHab := Grav
+			largestTerraformAmount := 0
+			for _, habType := range HabTypes {
+				if Abs(habDiff.Get(habType)) > Abs(largestTerraformAmount) {
+					largestTerraformAmount = habDiff.Get(habType)
+					largestTerraformHab = habType
+				}
+			}
+
+			// apply an unterraform amount in whatever direction we are going, to the largest terraform hab
+			direction := 1
+			if largestTerraformAmount > 0 {
+				direction = -1
+			}
+			unterraformAmount.Set(largestTerraformHab, unterraformAmount.Get(largestTerraformHab)+direction)
+		}
+	}
+
+	return unterraformAmount
+}
+
+// Get the total number of colonists killed by one or more Bombs.
+func (b *bomber) getColonistsKilledForBombs(population int, defenseCoverage float64, bombs []Bomb) float64 {
+	// calculate the killRate for all these bombs
+	var killRate float64
+	for _, bomb := range bombs {
+		// These sum up additively - 2 Cherries (2.5%) and an M-80 (1.7%) will result in 6.7% deaths/yr
+		// (reduced by defense coverage)
+
+		killRate += bomb.KillRate * float64(bomb.Quantity)
+	}
+
+	return killRate / 100.0 * (1 - defenseCoverage) * float64(population)
+}
+
+// Get the minimum number of colonists killed by one or more Bombs.
+func (b *bomber) getMinColonistsKilledForBombs(defenseCoverage float64, bombs []Bomb) float64 {
+	// calculate the minKill for all these bombs
+	minKill := 0
+	for _, bomb := range bombs {
+		// Fairly simple - just add em all up
+		minKill += bomb.MinKillRate * bomb.Quantity
+	}
+
+	return float64(minKill) * (1 - defenseCoverage)
+}
+
+// get the total number of destroyed structures for several bombs
+func (b *bomber) getStructuresDestroyed(defenseCoverage float64, bombs []Bomb) int {
+	// structures stack additively
+	var structuresDestroyed float64
+	for _, bomb := range bombs {
+		structuresDestroyed += bomb.StructureDestroyRate * float64(bomb.Quantity)
+	}
+
+	// this will destroy some number of structures that are allocated proportionally
+	// among mines, factories and defenses
+	// NOTE: defense coverage is halved for structures
+
+	// TODO: make this a rules?
+	return int(structuresDestroyed * (1 - defenseCoverage*0.5))
+}
+
+// Get the number of colonists killed by smart bombs.
+func (b *bomber) getColonistsKilledWithSmartBombs(population int, defenseCoverageSmart float64, bombs []Bomb) float64 {
+	// Smart bombs do *not* add linearly. Instead, they stack multiplicatively,
+	// each bomb only covering cases where the last failed to kill.
+	smartKillRate := 0.0
+	for _, bomb := range bombs {
+		if smartKillRate == 0 {
+			smartKillRate = math.Pow(1-bomb.KillRate/100.0, float64(bomb.Quantity))
+		} else {
+			smartKillRate *= math.Pow(1-bomb.KillRate/100.0, float64(bomb.Quantity))
+		}
+	}
+
+	if smartKillRate != 0 {
+		percentKilled := (1 - defenseCoverageSmart) * (1 - smartKillRate)
+		return float64(population) * percentKilled
+	}
+	return 0
+}

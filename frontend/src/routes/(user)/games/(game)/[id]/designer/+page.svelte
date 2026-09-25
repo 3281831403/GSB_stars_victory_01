@@ -1,0 +1,71 @@
+<script lang="ts">
+	import Breadcrumb from '$lib/components/game/Breadcrumb.svelte';
+	import DesignCard from '$lib/components/game/DesignCard.svelte';
+	import ItemTitle from '$lib/components/ItemTitle.svelte';
+	import TableSearchInput from '$lib/components/table/TableSearchInput.svelte';
+	import type { ShipDesign } from '$lib/types/cs-proto';
+	import { getGameContext } from '$lib/services/GameContext';
+
+	const { game, player, universe, deleteDesign } = getGameContext();
+
+	// filterable designs
+	let search = $state('');
+	let filteredDesigns: ShipDesign[] = $derived(
+		$universe
+			.getMyDesigns()
+			.filter(
+				(i) =>
+					i.name.toLowerCase().indexOf(search.toLowerCase()) != -1 ||
+					i.hull.toLowerCase().indexOf(search.toLocaleLowerCase()) != -1
+			)
+			.sort((a, b) => a.name.localeCompare(b.name))
+	);
+</script>
+
+<Breadcrumb>
+	{#snippet crumbs()}
+		<li>
+			<div class="hidden sm:block">Ship Designs</div>
+			<div class="sm:hidden">Designs</div>
+		</li>
+	{/snippet}
+	{#snippet end()}
+		<div class="flex justify-end mb-1">
+			<div class="flex flex-row justify-between gap-2 m-2">
+				<TableSearchInput bind:value={search} />
+				<div>
+					<a class="cs-link btn btn-sm" href={`/games/${$game.id}/designer/create`}
+						><span class="hidden sm:block">Create</span><span class="sm:hidden">+</span></a
+					>
+				</div>
+			</div>
+		</div>
+	{/snippet}
+</Breadcrumb>
+
+<div class="flex flex-wrap justify-evenly gap-2">
+	{#each filteredDesigns.filter((d) => d.playerNum === $player.num && !d.spec?.starbase) as design (design.num)}
+		<DesignCard
+			{design}
+			href={`/games/${$game.id}/designer/${design.num}`}
+			copyhref={`/games/${$game.id}/designer/create/${design.hull}?copy=${design.num}`}
+			onDelete={async (design) => {
+				if (design.num) deleteDesign(design.num);
+			}}
+		/>
+	{/each}
+</div>
+
+<ItemTitle>Starbases</ItemTitle>
+<div class="flex flex-wrap justify-evenly gap-2">
+	{#each filteredDesigns.filter((d) => d.playerNum === $player.num && d.spec?.starbase) as design (design.num)}
+		<DesignCard
+			{design}
+			href={`/games/${$game.id}/designer/${design.num}`}
+			copyhref={`/games/${$game.id}/designer/create/${design.hull}?copy=${design.num}`}
+			onDelete={async (design) => {
+				if (design.num) deleteDesign(design.num);
+			}}
+		/>
+	{/each}
+</div>

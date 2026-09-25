@@ -1,0 +1,54 @@
+<script lang="ts">
+	import TorpedoHit from '$lib/components/icons/TorpedoHit.svelte';
+	import { Battle } from '$lib/types/Battle';
+
+	type Props = {
+		battle: Battle;
+		phase: number;
+	};
+
+	let { battle, phase }: Props = $props();
+
+	let actionToken = $derived(battle.getActionToken(phase));
+	let action = $derived(battle.getActionForPhase(phase));
+	let targetVector = $derived.by(() => {
+		if (action?.to && actionToken) {
+			const target = {
+				x: (action.to.x ?? 0) - actionToken.x,
+				y: (action.to.y ?? 0) - actionToken.y
+			};
+
+			if (target.x === 0 && target.y === 0) {
+				target.x = 0.5;
+				target.y = 0.5;
+			}
+
+			return target;
+		}
+
+		return undefined;
+	});
+</script>
+
+<div class="absolute w-full h-full z-30 pointer-events-none">
+	{#if actionToken?.action?.type === 'BATTLE_RECORD_TOKEN_ACTION_TYPE_BEAM_FIRE' && targetVector}
+		<div class="relative left-0 top-0 w-full h-full">
+			<svg class="w-full h-full">
+				<path
+					d={`M${actionToken.x * 66 + 32}, ${actionToken.y * 66 + 32} l${targetVector.x * 66},${
+						targetVector.y * 66
+					}`}
+					class="beam-line"
+				/>
+			</svg>
+		</div>
+	{:else if action?.type === 'BATTLE_RECORD_TOKEN_ACTION_TYPE_TORPEDO_FIRE' && action.to}
+		<div class="relative left-0 top-0 w-full h-full">
+			<TorpedoHit
+				class="w-8 h-8 fill-transparent"
+				fill="#FF0000"
+				style={`transform: translate(${(action.to.x ?? 0) * 66 + 32 - 16}px, ${(action.to.y ?? 0) * 68 + 32 - 16}px)`}
+			/>
+		</div>
+	{/if}
+</div>

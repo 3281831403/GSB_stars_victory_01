@@ -1,0 +1,1239 @@
+package cs
+
+import (
+	"fmt"
+	"math"
+	"slices"
+	"sort"
+
+	"log/slog"
+)
+
+// The UniverseGenerator generates a new universe based on some game settings and players.
+type UniverseGenerator interface {
+	Generate() (*Universe, error)
+	GenerateWithUniverse(universe *Universe) error
+	Area() Vector
+}
+
+// A universe generator, used to generate starting universes for new games.
+type universeGenerator struct {
+	*FullGame
+	area Vector
+	log  *slog.Logger
+}
+
+func NewUniverseGenerator(game *Game, players []*Player) UniverseGenerator {
+	genLogger := slog.With(slog.Int64("GameID", game.ID), slog.String("GameName", game.Name))
+	return &universeGenerator{
+		FullGame: &FullGame{
+			Game:    game,
+			Players: players,
+		},
+		log: genLogger,
+	}
+}
+
+func (ug *universeGenerator) Area() Vector {
+	return ug.area
+}
+
+// Generate a new universe using a UniverseGenerator
+func (ug *universeGenerator) GenerateWithUniverse(universe *Universe) error {
+	ug.log.Debug("Generating universe", slog.String("Size", string(ug.Size)))
+
+	var err error
+	for _, player := range ug.Players {
+		player.Race.Spec = ComputeRaceSpec(&player.Race, &ug.Rules)
+		player.discoverer = newDiscovererWithAllies(ug.log, player, ug.Players)
+	}
+
+	ug.Universe = universe
+	area, err := ug.Rules.GetArea(ug.Size)
+	if err != nil {
+		return err
+	}
+	ug.area = area
+
+	ug.generatePlayerPlans()
+	ug.generatePlayerRelations()
+
+	if err := ug.generatePlayerPlanetReports(); err != nil {
+		return err
+	}
+
+	for _, player := range ug.Players {
+		player.Spec = ComputePlayerSpec(player, &ug.Rules)
+
+		// compute tech levels
+		for _, design := range player.Designs {
+			design.Spec, err = ComputeShipDesignSpec(&ug.Rules, player.TechLevels, player.Race.Spec, design)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	for _, planet := range ug.Universe.Planets {
+		if planet.Owned() {
+			player := ug.Players[planet.PlayerNum-1]
+
+			if planet.Starbase != nil {
+				planet.Starbase.InjectDesigns(player.Designs)
+			}
+			planet.Spec = ComputePlanetSpec(&ug.Rules, player, planet)
+			if err := planet.PopulateProductionQueueDesigns(player); err != nil {
+				return fmt.Errorf("planet %s failed to populate queue design: %w", planet, err)
+			}
+			if err := planet.PopulateProductionQueueEstimates(&ug.Rules, player); err != nil {
+				return fmt.Errorf("planet %s failed to populate queue estimates: %w", planet.Name, err)
+			}
+		}
+	}
+
+	for _, fleet := range ug.Universe.Fleets {
+		player := ug.getPlayer(fleet.PlayerNum)
+		fleet.InjectDesigns(player.Designs)
+		fleet.Spec = ComputeFleetSpec(&ug.Rules, player, fleet)
+	}
+
+	// TODO: chicken and egg problem. Player spec needs planet spec for resources, planet spec needs player spec for defense/scanner
+	for _, player := range ug.Players {
+		player.Spec = ComputePlayerSpec(player, &ug.Rules)
+	}
+
+	// do one scan run
+	if err := ug.generatePlayerIntel(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// Generate a new universe using a UniverseGenerator
+func (ug *universeGenerator) Generate() (*Universe, error) {
+	ug.log.Debug("Generating universe", slog.String("Size", string(ug.Size)))
+
+	for _, player := range ug.Players {
+		player.Race.Spec = ComputeRaceSpec(&player.Race, &ug.Rules)
+		player.discoverer = newDiscovererWithAllies(ug.log, player, ug.Players)
+	}
+
+	u := NewUniverse(ug.log, &ug.Rules)
+	ug.Universe = &u
+	area, err := ug.Rules.GetArea(ug.Size)
+	if err != nil {
+		return nil, err
+	}
+	ug.area = area
+
+	if err := ug.generatePlanets(); err != nil {
+		return nil, err
+	}
+
+	if err := ug.generateWormholes(); err != nil {
+		return nil, err
+	}
+
+	ug.generateAIPlayers()
+	ug.generatePlayerTechLevels()
+	ug.generatePlayerPlans()
+	if err := ug.generatePlayerShipDesigns(); err != nil {
+		return nil, err
+	}
+	ug.generatePlayerRelations()
+
+	if err := ug.generatePlayerStartingPlanets(); err != nil {
+		return nil, err
+	}
+
+	if err := ug.generatePlayerPlanetReports(); err != nil {
+		return nil, err
+	}
+
+	ug.applyGameStartModeModifier()
+
+	// setup all the specs for planets, fleets, etc
+	// Normal games only need to compute player specs and whatnot, but max mode games require
+	// complete re-computation due to changing techLevels, etc.
+	if ug.StartMode != GameStartModeNormal {
+		ug.computeSpecs()
+	} else {
+		for _, player := range ug.Players {
+			player.Spec = ComputePlayerSpec(player, &ug.Rules)
+		}
+
+		for _, planet := range ug.Universe.Planets {
+			if planet.Owned() {
+				player := ug.Players[planet.PlayerNum-1]
+				planet.Spec = ComputePlanetSpec(&ug.Rules, player, planet)
+				if err := planet.PopulateProductionQueueDesigns(player); err != nil {
+					return nil, fmt.Errorf("planet %s failed to populate queue design: %w", planet, err)
+				}
+				if err := planet.PopulateProductionQueueEstimates(&ug.Rules, player); err != nil {
+					return nil, fmt.Errorf("planet %s failed to populate queue estimates: %w", planet.Name, err)
+				}
+			}
+		}
+	}
+
+	// TODO: chicken and egg problem. Player spec needs planet spec for resources, planet spec needs player spec for defense/scanner
+	for _, player := range ug.Players {
+		player.Spec = ComputePlayerSpec(player, &ug.Rules)
+	}
+
+	// do one scan run
+	if err := ug.generatePlayerIntel(); err != nil {
+		return nil, err
+	}
+
+	return ug.Universe, nil
+}
+
+// placePlanets generates planet positions
+// Mirrors the original game
+// 1) seed extra candidates in a bordered rectangle
+// 2) enforce a minimum spacing via sweep-by-x
+// 3) randomly cull to exact target
+// 4) optional “clumping” pass nudging points toward nearest neighbor
+func (ug *universeGenerator) placePlanets(numPlanets, width, height, minSpacing, borderInset int) ([]Vector, error) {
+	if numPlanets <= 0 {
+		return nil, fmt.Errorf("placePlanets: numPlanets must be > 0")
+	}
+	if minSpacing < 0 || borderInset < 0 {
+		return nil, fmt.Errorf("placePlanets: minSpacing and borderInset must be >= 0")
+	}
+
+	if width <= 0 || height <= 0 {
+		return nil, fmt.Errorf("placePlanets: invalid area (%v x %v)", ug.area.X, ug.area.Y)
+	}
+
+	// start with extra planets to we can cull them later
+	numStartingPlanets := numPlanets + numPlanets/7
+
+	// Guard against tiny maps where border exceeds available space.
+	const extraMargin = 10 // original code used +10 and -20 band; we keep a small safety pad
+	xMin := borderInset + extraMargin
+	yMin := borderInset + extraMargin
+	xMax := width - borderInset - extraMargin
+	yMax := height - borderInset - extraMargin
+	if xMax <= xMin || yMax <= yMin {
+		return nil, fmt.Errorf("placePlanets: area too small after inset; (%d,%d)-(%d,%d)", xMin, yMin, xMax, yMax)
+	}
+	xSpan := xMax - xMin
+	ySpan := yMax - yMin
+
+	// Seed candidate points uniformly in the bordered rectangle
+	candidates := make([]Vector, numStartingPlanets)
+	for i := range numStartingPlanets {
+		// Your rules.random provides Intn; mirror C's uniform Random().
+		x := xMin + ug.Rules.random.Intn(xSpan)
+		y := yMin + ug.Rules.random.Intn(ySpan)
+		candidates[i] = Vector{X: x, Y: y}
+	}
+
+	// Sort by X
+	slices.SortFunc(candidates, VectorCompareX)
+
+	// Cull points that violate minimum spacing (sweep by x)
+	minSq := minSpacing * minSpacing
+	killed := make([]bool, numStartingPlanets)
+
+	for i := range numStartingPlanets {
+		if killed[i] {
+			continue
+		}
+		ix := candidates[i].X
+		iy := candidates[i].Y
+		xStop := ix + minSpacing
+
+		// Check only forward points whose X is within ix + minSpacing
+		for j := i + 1; j < numStartingPlanets; j++ {
+			if killed[j] {
+				continue
+			}
+			jx := candidates[j].X
+			if jx > xStop {
+				break // remaining have larger X; safe to stop inner loop
+			}
+			jy := candidates[j].Y
+
+			ady := Abs(iy - jy)
+			if ady > minSpacing {
+				continue
+			}
+
+			adx := ix - jx
+			dist2 := adx*adx + ady*ady
+			if dist2 <= minSq {
+				// Kill the later point
+				killed[j] = true
+			}
+		}
+	}
+
+	// Randomly mark more for deletion if still over capacity
+	aliveIdx := make([]int, 0, numStartingPlanets)
+	for i := range numStartingPlanets {
+		if !killed[i] {
+			aliveIdx = append(aliveIdx, i)
+		}
+	}
+	// If we ended under (can happen on very dense spacing requests),
+	// we’ll just accept the shortfall rather than re-seed (faithful to original “just place” step).
+	over := max(len(aliveIdx)-numPlanets, 0)
+	for c := 0; c < over; {
+		r := ug.Rules.random.Intn(len(aliveIdx))
+		i := aliveIdx[r]
+		if !killed[i] {
+			killed[i] = true
+			c++
+		}
+	}
+
+	// Compact survivors to front (collect final positions)
+	pos := make([]Vector, 0, numPlanets)
+	for i := 0; i < numStartingPlanets && len(pos) < numPlanets; i++ {
+		if !killed[i] {
+			pos = append(pos, candidates[i])
+		}
+	}
+
+	return pos, nil
+}
+
+// clump positions together
+func (ug *universeGenerator) clump(pos []Vector, width, height, borderInset, extraMargin int) {
+
+	xMin := borderInset + extraMargin
+	yMin := borderInset + extraMargin
+	xMax := width - borderInset - extraMargin
+	yMax := height - borderInset - extraMargin
+
+	// Optional clumping pass
+	// We mimic the original thresholds and movement fractions, but work in a rectangular map.
+	// After clumping we re-sort by X
+	count := len(pos)
+	// One sweep: pick a random point each time, nudge toward its nearest neighbor
+	for range count {
+		j := ug.Rules.random.Intn(count)
+		pj := pos[j]
+
+		// find nearest neighbor of j
+		bestK := -1
+		bestD2 := math.MaxInt32
+		jx, jy := pj.X, pj.Y
+		for k := range count {
+			if k == j {
+				continue
+			}
+			dx := jx - pos[k].X
+			dy := jy - pos[k].Y
+			d2 := int(dx*dx + dy*dy)
+			if d2 < bestD2 {
+				bestD2 = d2
+				bestK = k
+			}
+		}
+		if bestK < 0 {
+			continue
+		}
+
+		// Mirror the decompile thresholds:
+		// > 40^2: move 2/3 toward nearest
+		// > 25^2: move 1/2 toward nearest
+		// > 18^2: move 1/3 toward nearest
+		// else (but still > 12^2): move 1/5 toward nearest
+		if bestD2 > 12*12 {
+			n := pos[bestK]
+			switch {
+			case bestD2 > 40*40:
+				pos[j].X = (pj.X + 2*n.X) / 3
+				pos[j].Y = (pj.Y + 2*n.Y) / 3
+			case bestD2 > 25*25:
+				pos[j].X = (pj.X + n.X) / 2
+				pos[j].Y = (pj.Y + n.Y) / 2
+			case bestD2 > 18*18:
+				pos[j].X = (2*pj.X + n.X) / 3
+				pos[j].Y = (2*pj.Y + n.Y) / 3
+			default:
+				pos[j].X = (4*pj.X + n.X) / 5
+				pos[j].Y = (4*pj.Y + n.Y) / 5
+			}
+
+			// Keep within bordered rectangle just in case nudging crosses the border
+			if pos[j].X < xMin {
+				pos[j].X = xMin
+			} else if pos[j].X >= xMax {
+				pos[j].X = xMax - 1
+			}
+			if pos[j].Y < yMin {
+				pos[j].Y = yMin
+			} else if pos[j].Y >= yMax {
+				pos[j].Y = yMax - 1
+			}
+		}
+	}
+	// sort again by x for consistency
+	slices.SortFunc(pos, VectorCompareX)
+
+}
+
+// getPlayerPlanets picks homeworld planet indices for the first N players.
+// It only chooses positions; naming/initial setup can happen later.
+// Returns indices into ug.Universe.Planets in player order [0..N-1].
+func (ug *universeGenerator) getPlayerPlanets() ([]int, error) {
+	numPlayers := len(ug.Players)
+	if numPlayers <= 0 {
+		return nil, fmt.Errorf("getPlayerPlanets: NumPlayers must be > 0")
+	}
+	numPlanets := len(ug.Universe.Planets)
+	if numPlanets < numPlayers {
+		return nil, fmt.Errorf("getPlayerPlanets: not enough planets (%d) for %d players", numPlanets, numPlayers)
+	}
+
+	// Gather planet coordinates in a sortable slice (stable index mapping to Universe.Planets)
+	type pxy struct {
+		x, y int
+		i    int // original index
+	}
+	pts := make([]pxy, numPlanets)
+	for i, p := range ug.Universe.Planets {
+		pts[i] = pxy{int(p.Position.X), int(p.Position.Y), i}
+	}
+	// Sort by X
+	sort.Slice(pts, func(i, j int) bool {
+		if pts[i].x == pts[j].x {
+			return pts[i].y < pts[j].y
+		}
+		return pts[i].x < pts[j].x
+	})
+
+	width := int(ug.area.X)
+	height := int(ug.area.Y)
+	if width <= 0 || height <= 0 {
+		return nil, fmt.Errorf("getPlayerPlanets: invalid area (%v x %v)", width, height)
+	}
+
+	// ----- Distance band calculations -----
+	// area in the original was the (square) side; on a rectangle we use the limiting dimension.
+	area := min(width, height)
+
+	// Linear guard term
+	l := area * 6
+
+	// Ideal area-per-player term, shaved 10%
+	distIdeal := (width*height)/numPlayers - l
+	if distIdeal < 0 {
+		distIdeal = 0
+	} else {
+		distIdeal = distIdeal * 90 / 100
+	}
+
+	// Bias by start-distance setting, then re-add the linear guard.
+	// Original used mdStartDist/3 with 3 levels. Your enum has 4 levels; extend linearly:
+	// Close=1/3, Moderate=2/3, Farther=1.0, Distant=4/3.
+	switch ug.Game.PlayerPositions {
+	case PlayerPositionsClose:
+		distIdeal = distIdeal / 3
+	case PlayerPositionsModerate:
+		distIdeal = distIdeal * 2 / 3
+	case PlayerPositionsDistant:
+		distIdeal = distIdeal * 4 / 3
+
+	case PlayerPositionsFarther:
+		fallthrough
+	default:
+		// no op
+	}
+
+	distIdeal += l
+
+	// Acceptable band: *0.9 low, *7/6 high
+	distMinSquared := distIdeal * 90 / 100
+	distMaxSquared := distIdeal * 70 / 60
+
+	// Allowed box (percent of span) depends on player count, applied independently to X and Y.
+	var innerFrac, outerFrac int
+	switch {
+	case numPlayers < 3:
+		innerFrac, outerFrac = 15, 85
+	case numPlayers < 5:
+		innerFrac, outerFrac = 10, 90
+	default:
+		innerFrac, outerFrac = 5, 95
+	}
+	inBx := func(x, min, max int) bool { return x >= min && x <= max }
+	innerX, outerX := width*innerFrac/100, width*outerFrac/100
+	innerY, outerY := height*innerFrac/100, height*outerFrac/100
+
+	// Helpers
+	distSquared := func(ax, ay, bx, by int) int {
+		dx := ax - bx
+		dy := ay - by
+		return dx*dx + dy*dy
+	}
+	edgeDistSquared := func(x, y, xmin, xmax, ymin, ymax int) int {
+		var dx, dy int
+		if x < xmin {
+			dx = xmin - x
+		} else if x > xmax {
+			dx = x - xmax
+		}
+		if y < ymin {
+			dy = ymin - y
+		} else if y > ymax {
+			dy = y - ymax
+		}
+		return dx*dx + dy*dy
+	}
+
+retryFullPlacement:
+	chosen := make([]int, 0, numPlayers) // indices into pts
+	used := make([]bool, numPlanets)
+
+	// ---- 1) Pick the first index inside allowed box (or closest to it) ----
+	{
+		bestIdx := 0
+		bestEdge := math.MaxInt32
+		var idx int
+		tries := 0
+		for ; tries < 50; tries++ {
+			idx = ug.Rules.random.Intn(numPlanets)
+			if used[idx] {
+				continue
+			}
+			p := pts[idx]
+			if inBx(p.x, innerX, outerX) && inBx(p.y, innerY, outerY) {
+				// inside; take it
+				break
+			}
+			e2 := edgeDistSquared(p.x, p.y, innerX, outerX, innerY, outerY)
+			if e2 < bestEdge {
+				bestEdge = e2
+				bestIdx = idx
+			}
+		}
+		if tries == 50 {
+			idx = bestIdx
+		}
+		chosen = append(chosen, idx)
+		used[idx] = true
+	}
+
+	// ---- 2) Pick the remaining players honoring the distance band ----
+	for i := 1; i < numPlayers; i++ {
+		ok := false
+
+		// Random tries
+		for j := 0; j < 50 && !ok; j++ {
+			idx := ug.Rules.random.Intn(numPlanets)
+			if used[idx] {
+				continue
+			}
+			p := pts[idx]
+			if !inBx(p.x, innerX, outerX) || !inBx(p.y, innerY, outerY) {
+				continue
+			}
+
+			anyWithinMax := false
+			valid := true
+			for _, ck := range chosen {
+				q := pts[ck]
+				dist2 := distSquared(p.x, p.y, q.x, q.y)
+				if dist2 < distMinSquared {
+					valid = false
+					break
+				}
+				if dist2 <= distMaxSquared {
+					anyWithinMax = true
+				}
+			}
+			if valid && anyWithinMax {
+				chosen = append(chosen, idx)
+				used[idx] = true
+				ok = true
+				break
+			}
+		}
+
+		// Circular scan fallback
+		if !ok {
+			start := ug.Rules.random.Intn(numPlanets)
+			idx := start
+			for {
+				idx++
+				if idx >= numPlanets {
+					idx = 0
+				}
+				if idx == start {
+					break // wrapped without success
+				}
+				if used[idx] {
+					continue
+				}
+				p := pts[idx]
+				if !inBx(p.x, innerX, outerX) || !inBx(p.y, innerY, outerY) {
+					continue
+				}
+				anyWithinMax := false
+				valid := true
+				for _, ck := range chosen {
+					q := pts[ck]
+					dist2 := distSquared(p.x, p.y, q.x, q.y)
+					if dist2 < distMinSquared {
+						valid = false
+						break
+					}
+					if dist2 <= distMaxSquared {
+						anyWithinMax = true
+					}
+				}
+				if valid && anyWithinMax {
+					chosen = append(chosen, idx)
+					used[idx] = true
+					ok = true
+					break
+				}
+			}
+		}
+
+		// If we still couldn't place player i, relax the band and restart.
+		if !ok {
+			// Matches the “-35/+35” flavor from the decompile (units here are squared).
+			distMinSquared -= 35
+			if distMinSquared < 0 {
+				distMinSquared = 0
+			}
+			distMaxSquared += 35
+			goto retryFullPlacement
+		}
+	}
+
+	// Map back to Universe.Planets indices in the original (unsorted) order.
+	out := make([]int, numPlayers)
+	for i := 0; i < numPlayers; i++ {
+		out[i] = pts[chosen[i]].i
+	}
+
+	// // (Optional) mark the planets; comment out if you prefer to do this later.
+	// for pi, idx := range out {
+	// 	pl := ug.Universe.Planets[idx]
+	// 	pl.Homeworld = true
+	// 	pl.MapObject.PlayerNum = pi + 1 // or your own player ordering/IDs
+	// }
+
+	return out, nil
+}
+
+func (ug *universeGenerator) generatePlanets() error {
+
+	numPlanets, err := ug.Rules.GetNumPlanets(ug.Size, ug.Density)
+	if err != nil {
+		return err
+	}
+
+	ug.log.Debug("Generating planets in universe",
+		slog.Int("numPlanets", numPlanets),
+		slog.Int("areaX", ug.area.X),
+		slog.Int("areaY", ug.area.Y))
+
+	names := planetNames
+	rules := &ug.Rules
+	rules.random.Shuffle(len(names), func(i, j int) { names[i], names[j] = names[j], names[i] })
+
+	// place planets in the universe
+	positions, err := ug.placePlanets(numPlanets, int(ug.area.X), int(ug.area.Y), ug.Rules.MinPlanetSpacing, ug.Rules.BorderInset)
+	if err != nil {
+		return err
+	}
+
+	// if clumping enabled, clump up the planets
+	if ug.GalaxyClumping {
+		ug.clump(positions, int(ug.area.X), int(ug.area.Y), ug.Rules.MinPlanetSpacing, ug.Rules.BorderInset)
+	}
+
+	// in case we don't have quite as many planets as we thought
+	numPlanets = len(positions)
+
+	// Create Planet objects with positions only (names/spec/etc. handled later)
+	ug.Universe.Planets = make([]*Planet, numPlanets)
+
+	for i := range numPlanets {
+		// we found a good position; setup a new planet
+		planet := NewPlanet()
+		planet.Name = names[i]
+		planet.Num = i + 1
+		planet.Position = Vector{positions[i].X, positions[i].Y}
+		planet.randomize(rules, ug.StartMode == GameStartModeAccBBS)
+
+		if ug.MaxMinerals {
+			planet.MineralConcentration = Mineral{100, 100, 100}
+		}
+		if ug.RandomEvents && rules.RandomEventChances[RandomEventAncientArtifact] >= rules.random.Float64() {
+			// roll for a random artifact
+			planet.RandomArtifact = true
+		}
+
+		ug.Universe.Planets[i] = planet
+	}
+
+	// TODO: to make it easier to develop and troubleshoot data, currently leaving this unshuffled
+	// shuffle these so id 1 is not always the first planet in the list
+	// later on we will add homeworlds based on first planet, second planet, etc
+	// gu.rules.Random.Shuffle(len(gu.planets), func(i, j int) { gu.planets[i], gu.planets[j] = gu.planets[j], gu.planets[i] })
+
+	return nil
+}
+
+func (ug *universeGenerator) generateWormholes() error {
+	numPairs := ug.Rules.WormholePairsForSize[ug.Size]
+	wormholes := make([]*Wormhole, numPairs*2)
+
+	planetPositions := make([]Vector, len(ug.Universe.Planets))
+	wormholePositions := make([]Vector, len(wormholes))
+	for i, planet := range ug.Universe.Planets {
+		planetPositions[i] = planet.Position
+	}
+
+	for i := range numPairs * 2 {
+		position, stability, err := generateWormhole(ug.Universe, ug.area, ug.Rules.random, planetPositions, wormholePositions, ug.Rules.WormholeMinPlanetDistance)
+
+		if err != nil {
+			return err
+		}
+
+		var companion *Wormhole
+		if i%2 > 0 {
+			// every wormhole needs a companiom
+			companion = wormholes[i-1]
+		}
+		wormhole := ug.Universe.createWormhole(&ug.Rules, position, stability, companion)
+		ug.log.Debug("generated Wormhole",
+			slog.Int("X", wormhole.Position.X),
+			slog.Int("Y", wormhole.Position.Y))
+
+		wormholePositions[i] = wormhole.Position
+		wormholes[i] = wormhole
+	}
+
+	ug.Universe.Wormholes = wormholes
+
+	return nil
+}
+
+func (ug *universeGenerator) generateAIPlayers() {
+	names := AINames
+	cheaterNames := AICheaterNames
+	ug.Rules.random.Shuffle(len(names), func(i, j int) { names[i], names[j] = names[j], names[i] })
+	ug.Rules.random.Shuffle(len(cheaterNames), func(i, j int) { cheaterNames[i], cheaterNames[j] = cheaterNames[j], cheaterNames[i] })
+	for index, player := range ug.Players {
+		if player.AIControlled {
+
+			name := names[index%len(names)]
+			if player.AIDifficulty == AIDifficultyCheater {
+				name = cheaterNames[index%len(cheaterNames)]
+			}
+			player.Race.Name = name[0]
+			player.Race.PluralName = name[1]
+		}
+	}
+}
+
+func (ug *universeGenerator) generatePlayerTechLevels() {
+	for _, player := range ug.Players {
+		player.TechLevels = TechLevel(player.Race.Spec.StartingTechLevels)
+	}
+}
+
+func (ug *universeGenerator) generatePlayerPlans() {
+	for _, player := range ug.Players {
+		player.PlayerPlans = player.defaultPlans()
+	}
+}
+
+// generate designs for each player
+func (ug *universeGenerator) generatePlayerShipDesigns() error {
+	var err error
+	techStore := ug.Rules.techs
+	for _, player := range ug.Players {
+		designNames := map[string]bool{}
+		num := 1
+		for _, startingPlanet := range player.Race.Spec.StartingPlanets {
+			for _, startingFleet := range startingPlanet.StartingFleets {
+				if designNames[startingFleet.Name] {
+					// only create one design per name, i.e. Scout, Armed Probe
+					// multiple starting fleets will use the same design
+					continue
+				}
+				hull := techStore.GetHull(string(startingFleet.HullName))
+				if !player.HasTech(&hull.Tech) {
+					// player can't use hull; move on
+					continue
+				}
+				design, err := DesignShip(&ug.Game.Rules, player, hull, startingFleet.Name, num, int(startingFleet.HullSetNumber), startingFleet.Purpose, FleetPurposeFromShipDesignPurpose(startingFleet.Purpose))
+				if err != nil {
+					return fmt.Errorf("DesignShip returned error %w", err)
+				}
+				player.Designs = append(player.Designs, design)
+				designNames[design.Name] = true
+				num++
+			}
+		}
+
+		starbaseDesigns := ug.createStartingStarbaseDesigns(ug.Rules.techs, player, num)
+
+		for i := range starbaseDesigns {
+			design := starbaseDesigns[i]
+			design.Spec, err = ComputeShipDesignSpec(&ug.Rules, player.TechLevels, player.Race.Spec, design)
+			if err != nil {
+				return fmt.Errorf("ComputeShipDesignSpec returned error: %w", err)
+			}
+			player.Designs = append(player.Designs, design)
+		}
+	}
+	return nil
+}
+
+// have each player discover all the planets in the universe
+func (ug *universeGenerator) generatePlayerPlanetReports() error {
+	for _, player := range ug.Players {
+		player.initDefaultPlanetIntels(ug.Universe.Planets)
+	}
+	return nil
+}
+
+// generate player starting positions in the given area
+func (ug *universeGenerator) generatePlayerStartingPlanets() error {
+
+	rules := &ug.Rules
+	random := rules.random
+
+	// each player homeworld has the same baseline random mineral concentration, for fairness
+	var homeworldMinConc Mineral
+	if ug.MaxMinerals {
+		homeworldMinConc = Mineral{100, 100, 100}
+	} else {
+		homeworldMinConc = Mineral{
+			Ironium:   rules.MinHomeworldMineralConcentration + random.Intn(rules.MaxStartingMineralConcentration),
+			Boranium:  rules.MinHomeworldMineralConcentration + random.Intn(rules.MaxStartingMineralConcentration),
+			Germanium: rules.MinHomeworldMineralConcentration + random.Intn(rules.MaxStartingMineralConcentration),
+		}
+	}
+
+	homeworldSurfaceMinerals := Mineral{
+		Ironium:   rules.MinStartingMineralSurface + random.Intn(rules.MaxStartingMineralSurface),
+		Boranium:  rules.MinStartingMineralSurface + random.Intn(rules.MaxStartingMineralSurface),
+		Germanium: rules.MinStartingMineralSurface + random.Intn(rules.MaxStartingMineralSurface),
+	}
+
+	extraWorldSurfaceMinerals := Mineral{
+		Ironium:   rules.MinStartingMineralSurface + random.Intn(rules.MaxStartingMineralSurface),
+		Boranium:  rules.MinStartingMineralSurface + random.Intn(rules.MaxStartingMineralSurface),
+		Germanium: rules.MinStartingMineralSurface + random.Intn(rules.MaxStartingMineralSurface),
+	}
+
+	// get a planet index for each player
+	playerPlanetsIndexes, err := ug.getPlayerPlanets()
+	if err != nil {
+		return err
+	}
+
+	for _, player := range ug.Players {
+		fleetNum := 1
+		var homeworld *Planet
+		extraPoints, pointsType := player.Race.ComputeLeftoverRacePoints(rules.RaceStartingPoints)
+
+		// assign player starting planets
+		// TODO: Add custom planet placement support for team games:
+		// * Assign random starting planets to each "team" maximizing distance between enemy factions
+		// * Place allied homeworlds around each initial planet within a smaller range
+		// * Place players within each faction randomly and assign starting planets
+		for _, startingPlanet := range player.Race.Spec.StartingPlanets {
+			if !startingPlanet.Homeworld && homeworld == nil {
+				// Since extra planets _have_ to be placed around the homeworld,
+				// the homeworld needs to be the first thing we place
+				return fmt.Errorf("first planet in player #%d's startingPlanets was not homeworld, exiting", player.Num)
+			}
+
+			var playerPlanet *Planet
+			if startingPlanet.Homeworld && homeworld == nil {
+				// place homeworld and track it so we know where to base extra world placement on
+				playerPlanet = ug.getPlanet(playerPlanetsIndexes[player.Num-1] + 1)
+				homeworld = playerPlanet
+			} else {
+				secondPlanetIndex, err := ug.placeExtraPlayerPlanet(homeworld.Num-1, 12, 35)
+				playerPlanet = ug.getPlanet(secondPlanetIndex + 1)
+				if err != nil {
+					return err
+				}
+			}
+
+			var surface Mineral
+			if startingPlanet.Homeworld {
+				surface = homeworldSurfaceMinerals
+			} else {
+				surface = extraWorldSurfaceMinerals
+			}
+
+			// make a new starter world and spend leftover points
+			ug.log.Debug("Assigning planet to player as homeworld",
+				slog.String("Planet", playerPlanet.String()),
+				slog.String("Player", player.String()))
+			playerPlanet.initStartingWorld(player, &ug.Rules, startingPlanet, homeworldMinConc, surface)
+			if startingPlanet.Homeworld {
+				ug.assignRaceStartingPointBonuses(&player.Race, playerPlanet, extraPoints, pointsType)
+			} else if !ug.MaxMinerals {
+				playerPlanet.MineralConcentration = randomizeMinerals(rules, playerPlanet.Hab.Rad, ug.StartMode == GameStartModeAccBBS)
+			}
+
+			// add a starbase to this planet
+			if startingPlanet.StarbaseDesignName != "" {
+				if err := ug.buildStarbase(player, playerPlanet, startingPlanet.StarbaseDesignName); err != nil {
+					return fmt.Errorf("building starbase during universe gen failed: %w", err)
+				}
+			}
+
+			// tell the player about their homeworld
+			if startingPlanet.Homeworld {
+				messager.planetHomeworld(player, playerPlanet)
+			}
+
+			// generate some fleets on the homeworld
+			if err := ug.generatePlayerFleets(player, playerPlanet, &fleetNum, startingPlanet.StartingFleets); err != nil {
+				return fmt.Errorf("generating fleets for planet %s during universe gen failed: %w", playerPlanet, err)
+			}
+		}
+	}
+
+	return nil
+}
+
+// placeExtraPlayerPlanet chooses a planet near a given homeworld.
+// It prefers planets whose distance from the home is within [pctLo, pctHi] * dGal,
+// falling back to the nearest planet outside that band.
+// Returns the index into ug.Universe.Planets.
+func (ug *universeGenerator) placeExtraPlayerPlanet(homeIdx int, pctLo, pctHi int) (int, error) {
+	if homeIdx < 0 || homeIdx >= len(ug.Universe.Planets) {
+		return -1, fmt.Errorf("pickSecondPlanetNearHome: invalid home index %d", homeIdx)
+	}
+	if pctLo < 0 || pctHi < 0 || pctLo > pctHi {
+		return -1, fmt.Errorf("pickSecondPlanetNearHome: bad ring percentages lo=%d hi=%d", pctLo, pctHi)
+	}
+
+	// dGal analog: original used a square side; on wide maps we use the limiting dimension.
+	dGal := int(min(ug.area.X, ug.area.Y))
+
+	rLo := dGal * pctLo / 100
+	rHi := dGal * pctHi / 100
+	distMin := rLo * rLo
+	distMax := rHi * rHi
+	distBest := math.MaxInt32
+	numFound := 0
+
+	hw := ug.Universe.Planets[homeIdx]
+
+	var picked *Planet
+	var closest *Planet
+
+	for _, planet := range ug.Planets {
+		if planet.Owned() {
+			continue
+		}
+		dx := int(planet.Position.X - hw.Position.X)
+		dy := int(planet.Position.X - hw.Position.X)
+		dist := dx*dx + dy*dy
+		if dist >= distMin && dist <= distMax {
+			numFound++
+			if ug.Rules.random.Intn(numFound) == 0 {
+				picked = planet
+			}
+		} else if picked == nil && dist < distBest {
+			distBest = dist
+			closest = planet
+		}
+	}
+
+	if picked != nil {
+		return picked.Num, nil
+	}
+	if closest != nil {
+		return closest.Num, nil
+	}
+
+	return -1, fmt.Errorf("pickSecondPlanetNearHome: no eligible planets")
+}
+
+// Assign race starting point bonuses to a player's homeworld.
+func (ug *universeGenerator) assignRaceStartingPointBonuses(race *Race, planet *Planet, extraPoints int, pointsType SpendLeftoverPointsOn) {
+	// This algorithm was adapted from Stars! source code.
+
+	rules := ug.Rules
+	if extraPoints == 0 {
+		// No points makes our life very simple; do nothing!
+		return
+	}
+
+	// add bonuses based on pointsType, swapping to surface mins if the race can't use/afford it
+	// This does deviate from OG Stars! behavior slightly, but we can afford to be nice here.
+	// TODO: Add a small warning symbol on the frontend race screen (along with a message mentioning as such)
+	switch pointsThreshold := rules.RaceLeftoverPointsPerItem[pointsType]; {
+	case pointsType == SpendLeftoverPointsOnDefenses &&
+		extraPoints >= (pointsThreshold/2) && !race.Spec.LivesOnStarbases:
+		// For some ungodly reason, starting defenses round half up in OG Stars.
+		// It still costs 10 pts/defense; the first one just costs 5 less
+		planet.Defenses += (extraPoints + pointsThreshold/2) / pointsThreshold
+	case pointsType == SpendLeftoverPointsOnFactories &&
+		extraPoints >= pointsThreshold && !race.Spec.InnateResources:
+		planet.Factories += extraPoints / pointsThreshold
+	case pointsType == SpendLeftoverPointsOnMines &&
+		extraPoints >= pointsThreshold && !race.Spec.InnateMining:
+		planet.Mines += extraPoints / pointsThreshold
+	case pointsType == SpendLeftoverPointsOnMineralConcentrations:
+		concLeft := max(extraPoints/pointsThreshold, 1) // "Rounds up" the first minconc bonus
+		m := planet.MineralConcentration
+		lowestType, _ := m.HighestType(-1) // Iron takes precedence, just like in base game
+		m = m.AddNum(lowestType, concLeft)
+		m = m.AddToAll((concLeft + 1) / 2)
+		planet.MineralConcentration = m
+	default:
+		// Algorithm taken directly from Stars! source.
+		// Cheater AIs are _supposed_ to get this AND minconcs, but we don't give ours
+		// any special treatment (they *are* supposed to be a lot smarter)
+		ktLeft := extraPoints * rules.RaceLeftoverPointsPerItem[SpendLeftoverPointsOnSurfaceMinerals]
+		m := planet.Cargo.ToMineral()
+		lowestType, _ := m.HighestType(-1)
+		m = m.AddNum(lowestType, ktLeft/4+ktLeft%3)
+		m = m.AddToAll(ktLeft / 4)
+		planet.Cargo.SetMineral(m)
+	}
+}
+
+// build a starbase on a planet
+func (ug *universeGenerator) buildStarbase(player *Player, planet *Planet, designName string) error {
+	// the homeworld gets a starbase
+	design := player.GetDesignByName(designName)
+	if design == nil {
+		return fmt.Errorf("no design named %q found for player %s", designName, player)
+	}
+
+	design.Spec.NumBuilt++
+	design.Spec.NumInstances++
+	starbase := newStarbase(player, planet, design, design.Name)
+	starbase.Spec = ComputeFleetSpec(&ug.Rules, player, &starbase)
+	planet.setStarbase(&starbase)
+
+	ug.Universe.Starbases = append(ug.Universe.Starbases, &starbase)
+
+	return nil
+}
+
+func (ug *universeGenerator) generatePlayerFleets(player *Player, planet *Planet, fleetNum *int, startingFleets []StartingFleet) error {
+	for _, startingFleet := range startingFleets {
+		design := player.GetDesignByName(startingFleet.Name)
+		if design == nil {
+			// design got ommitted (likely due to a missing hull or similar); just smile and wave
+			continue
+		}
+		fleet := newFleetForDesign(player, design, 1, *fleetNum, startingFleet.Name, []Waypoint{NewPlanetWaypoint(planet.Position, planet.Num, planet.Name, design.Spec.Engine.IdealSpeed)})
+		fleet.OrbitingPlanetNum = planet.Num
+		fleet.Spec = ComputeFleetSpec(&ug.Rules, player, &fleet)
+		fleet.Fuel = fleet.Spec.FuelCapacity
+		fleet.Spec.EstimatedRange = fleet.getEstimatedRange(player, fleet.Spec.Engine.IdealSpeed, fleet.Spec.CargoCapacity)
+		purpose := FleetPurposeFromShipDesignPurpose(design.Purpose)
+		fleet.SetTag(TagPurpose, string(purpose))
+		ug.Universe.Fleets = append(ug.Universe.Fleets, &fleet)
+		design.Spec.NumInstances++
+		design.Spec.NumBuilt++
+		(*fleetNum)++ // increment fleet num
+	}
+
+	return nil
+}
+
+func (ug *universeGenerator) applyGameStartModeModifier() {
+	switch ug.StartMode {
+	case GameStartModeAccBBS:
+		ug.applyAccBBS()
+	case GameStartModeMax:
+		ug.maxPlayersAndPlanets()
+	}
+}
+
+func (ug *universeGenerator) applyAccBBS() {
+	for _, planet := range ug.Planets {
+		// only owned planets will have surface mineral deposits or population,
+		// so we can skip unowned ones
+		if !planet.Owned() {
+			continue
+		}
+
+		// Add 25% extra homeworld surface minerals
+		// (the help manual lied when it said 20%)
+		planet.Cargo.SetMineral(planet.Cargo.ToMineral().MultiplyFloat64(1.25, math.Floor))
+
+		// AccBBS adds 20% addiional starting pop (+5K over the default 25K)
+		// per 1% of a race's growth rate.
+		race := ug.getPlayer(planet.PlayerNum).Race
+		planet.Cargo.Colonists += int(float64(planet.Cargo.Colonists*race.GrowthRate) *
+			race.Spec.GrowthFactor / 5)
+	}
+}
+
+func (ug *universeGenerator) maxPlayersAndPlanets() {
+	rules := &ug.Rules
+	for _, player := range ug.Players {
+		// max tech levels, acquire all mt techs
+		player.TechLevels = TechLevel{rules.MaxTechLevel, rules.MaxTechLevel, rules.MaxTechLevel, rules.MaxTechLevel, rules.MaxTechLevel, rules.MaxTechLevel}
+		for _, mtTech := range MysteryTraderTechs {
+			player.AcquiredTechs[mtTech.Name] = true
+		}
+	}
+
+	for _, planet := range ug.Planets {
+		// max out min concs and add a lot of surface minerals
+		planet.MineralConcentration = Mineral{rules.MaxMineralConcentration, rules.MaxMineralConcentration, rules.MaxMineralConcentration}
+		planet.Cargo = Cargo{1_000_000, 1_000_000, 1_000_000, 0}
+		if !planet.Owned() {
+			continue
+		}
+
+		// max out pop & installations on owned planets
+		player := ug.Players[planet.PlayerNum-1]
+		planet.setPopulation(planet.getMaxPopulation(rules, player, player.Race.GetPlanetHabitability(planet.Hab)))
+		if player.Race.Spec.CanBuildDefenses {
+			planet.Defenses = 100
+		}
+		if !player.Race.Spec.InnateMining {
+			planet.Mines = getMaxInstallations(player.Race.NumMines, planet.GetPopulation())
+		}
+		if !player.Race.Spec.InnateResources {
+			planet.Factories = getMaxInstallations(player.Race.NumFactories, planet.GetPopulation())
+		}
+	}
+}
+
+// create initial starbase designs for a player
+func (ug *universeGenerator) createStartingStarbaseDesigns(techStore *TechStore, player *Player, designNum int) []*ShipDesign {
+	numStartingPlanets := len(player.Race.Spec.StartingPlanets)
+	designs := make([]*ShipDesign, numStartingPlanets)
+
+	for i, startingPlanet := range player.Race.Spec.StartingPlanets {
+		var starbase *ShipDesign
+		var purpose ShipDesignPurpose
+		switch {
+		case i == 0:
+			// first design is a starbase, rest are forts of various kinds
+			purpose = ShipDesignPurposeStarbase
+		case startingPlanet.HasMassDriver:
+			purpose = ShipDesignPurposePacketThrower
+		case startingPlanet.HasStargate:
+			purpose = ShipDesignPurposeStargater
+		default:
+			purpose = ShipDesignPurposeFort
+		}
+
+		starbase = NewShipDesign(player.Num, designNum).
+			WithName(startingPlanet.StarbaseDesignName).
+			WithHull(startingPlanet.StarbaseHull).
+			WithPurpose(purpose).
+			WithHullSetNumber(player.DefaultHullSet)
+		fillStarbaseSlots(techStore, starbase, startingPlanet)
+		designNum++
+		designs[i] = starbase
+	}
+
+	if player.Race.Spec.LivesOnStarbases {
+		// create a starter colony for AR races
+		starterColony := NewShipDesign(player.Num, designNum).
+			WithName("Starter Colony").
+			WithHull(OrbitalFort.Name).
+			WithPurpose(ShipDesignPurposeStarterColony).
+			WithHullSetNumber(player.DefaultHullSet)
+		starterColony.CannotDelete = true
+		designs = append(designs, starterColony) // add it to the back
+	}
+
+	return designs
+}
+
+// Player starting starbases are all the same, regardless of starting tech level
+// They get half filled with the starter beam & shield
+func fillStarbaseSlots(techStore *TechStore, starbase *ShipDesign, startingPlanet StartingPlanet) {
+	hull := techStore.GetHull(starbase.Hull)
+	beamWeapon := techStore.GetHullComponentsByCategory(TechCategoryBeamWeapon)[0]
+	shield := techStore.GetHullComponentsByCategory(TechCategoryShield)[0]
+	var massDriver, stargate TechHullComponent
+	var haveDriver, haveGate bool
+	for _, hc := range techStore.GetHullComponentsByCategory(TechCategoryOrbital) {
+		if hc.PacketSpeed > 0 {
+			massDriver = hc
+			haveDriver = true
+		}
+		if hc.SafeRange > 0 {
+			stargate = hc
+			haveGate = true
+		}
+
+		if (haveDriver || !startingPlanet.HasMassDriver) && // we either don't need a driver or have one already
+			(haveGate || !startingPlanet.HasStargate) { // we either don't need a driver or have one already
+			// we have all the orbital components we need; done with lookup
+			break
+		}
+	}
+
+	placedMassDriver := false
+	placedStargate := false
+	for index, slot := range hull.Slots {
+		var item TechHullComponent
+		qty := int(math.Round(float64(slot.Capacity) / 2))
+		switch {
+		case slot.Type&HullSlotTypeWeapon != 0:
+			item = beamWeapon
+		case slot.Type&HullSlotTypeShield != 0:
+			item = shield
+		case slot.Type&HullSlotTypeOrbital != 0:
+			qty = 1
+			if startingPlanet.HasStargate && !placedStargate {
+				item = stargate
+			} else if startingPlanet.HasMassDriver && !placedMassDriver {
+				item = massDriver
+			}
+		}
+
+		if item.Name != "" {
+			starbase.Slots = append(starbase.Slots, ShipDesignSlot{
+				HullComponent: item.Name,
+				HullSlotIndex: index + 1,
+				Quantity:      qty,
+			})
+			placedStargate = placedStargate || item.SafeRange > 0
+			placedMassDriver = placedMassDriver || item.PacketSpeed > 0
+		}
+	}
+}
+
+func (ug *universeGenerator) generatePlayerRelations() {
+	for _, player := range ug.Players {
+		player.Relations = player.defaultRelationships(ug.Players, ug.ComputerPlayersFormAlliances)
+	}
+}
+
+func (ug *universeGenerator) generatePlayerIntel() error {
+	// make sure our universe maps are up to date
+	ug.Universe.buildMaps(ug.Players)
+	for _, player := range ug.Players {
+		// discover other players
+		player.Intels.PlayerIntels = player.defaultPlayerIntels(ug.Players)
+		player.Intels.ScoreIntels = make([]ScoreIntel, len(ug.Players))
+	}
+
+	// do initial scans (after play discoveries, since allied players "discover" eachother when scanning)
+	for _, player := range ug.Players {
+		scanner := newPlayerScanner(ug.Universe, ug.Players, &ug.Rules, player)
+		if err := scanner.scan(); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}

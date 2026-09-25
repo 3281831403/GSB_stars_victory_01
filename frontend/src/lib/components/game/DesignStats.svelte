@@ -1,0 +1,138 @@
+<script lang="ts">
+	import { MinefieldType, type ShipDesignSpec } from '$lib/types/cs-proto';
+	import { Infinite, NoScanner } from '$lib/types/Consts';
+	import BattleSpeed from './BattleSpeed.svelte';
+
+	type Props = {
+		spec: ShipDesignSpec | undefined;
+	};
+
+	let { spec }: Props = $props();
+
+	function scanRange(range: number | undefined) {
+		return !range || range === NoScanner ? '-' : range;
+	}
+</script>
+
+<div class="flex flex-col min-w-[8rem]">
+	{#if spec}
+		<div class="flex justify-between">
+			<div class="font-semibold mr-5">Mass</div>
+			<div>{spec.mass}kT</div>
+		</div>
+		<div class="flex justify-between">
+			<div class="font-semibold mr-5">Max Fuel</div>
+			<div>{spec.fuelCapacity}mg</div>
+		</div>
+		{#if spec.fuelGeneration && spec.fuelGeneration > 0}
+			<div class="flex justify-between">
+				<div class="font-semibold mr-5">Fuel Generation</div>
+				<div>{spec.fuelGeneration}mg</div>
+			</div>
+		{/if}
+		{#if spec.estimatedRange}
+			<div class="flex justify-between">
+				{#if spec.estimatedRange == Infinite}
+					<div class="font-semibold mr-5">Est Range</div>
+					<div>Infinite</div>
+				{:else if spec.cargoCapacity}
+					<div class="font-semibold mr-5">Est Range (w/cargo)</div>
+					<div class="text-right">
+						{spec.estimatedRange}ly ({spec.estimatedRangeFull}ly)
+					</div>
+				{:else}
+					<div class="font-semibold mr-5">Est Range</div>
+					<div>{spec.estimatedRange}ly</div>
+				{/if}
+			</div>
+		{/if}
+
+		{#if spec.cargoCapacity}
+			<div class="flex justify-between">
+				<div class="font-semibold mr-5">Cargo Capacity</div>
+				<div>{spec.cargoCapacity}kT</div>
+			</div>
+		{/if}
+		<div class="flex justify-between">
+			<div class="font-semibold mr-5">Armor</div>
+			<div>{spec.armor}dp</div>
+		</div>
+		{#if spec.shields}
+			<div class="flex justify-between">
+				<div class="font-semibold mr-5">Shields</div>
+				<div>{spec.shields}dp</div>
+			</div>
+		{/if}
+
+		{#if spec.powerRating}
+			<div class="flex justify-between">
+				<div class="font-semibold mr-5">Rating</div>
+				<div>{spec.powerRating}</div>
+			</div>
+		{/if}
+		{#if spec.cloakPercent}
+			{#if spec.cargoCapacity}
+				<div class="flex justify-between">
+					<div class="font-semibold mr-5">Cloak (with cargo)</div>
+					<div class="">{spec.cloakPercent}% ({spec.cloakPercentFullCargo}%)</div>
+				</div>
+			{:else}
+				<div class="flex justify-between">
+					<div class="font-semibold mr-5">Cloak</div>
+					<div>{spec.cloakPercent}%</div>
+				</div>
+			{/if}
+		{/if}
+		{#if spec.torpedoBonus || spec.torpedoJamming}
+			<div class="flex justify-between">
+				<div class="font-semibold mr-5">Torpedo Bonus/Jamming</div>
+				<div>
+					{(spec.torpedoBonus * 100).toFixed()}%/{(spec.torpedoJamming * 100).toFixed(2)}%
+				</div>
+			</div>
+		{/if}
+		{#if (spec.beamBonus && spec.beamBonus !== 1) || (spec.beamDefense && spec.beamDefense !== 1)}
+			<div class="flex justify-between">
+				<div class="font-semibold mr-5">Beam Bonus/Defense</div>
+				<div>
+					x{(spec.beamBonus || 1).toFixed(2)}/x{(spec.beamDefense || 1).toFixed(2)}
+				</div>
+			</div>
+		{/if}
+		<div class="flex justify-between">
+			<div class="font-semibold mr-5">Initiative/Moves</div>
+			<div>{spec.initiative}/<BattleSpeed speed={spec.movement}></BattleSpeed></div>
+		</div>
+		{#if spec.scanRange != NoScanner || spec.scanRangePen != NoScanner}
+			<div class="flex justify-between">
+				<div class="font-semibold mr-5">Scanner Range</div>
+				<div>{scanRange(spec.scanRange)}/{scanRange(spec.scanRangePen)}</div>
+			</div>
+		{/if}
+
+		{#if spec.mineLayingRateByMineType[MinefieldType.STANDARD]}
+			<div class="flex justify-between">
+				<div class="font-semibold mr-5">Mine Laying</div>
+				<div>{spec.mineLayingRateByMineType[MinefieldType.STANDARD]} std/yr</div>
+			</div>
+		{/if}
+		{#if spec.mineLayingRateByMineType[MinefieldType.HEAVY]}
+			<div class="flex justify-between">
+				<div class="font-semibold mr-5">Mine Laying</div>
+				<div>{spec.mineLayingRateByMineType[MinefieldType.HEAVY]} hvy/yr</div>
+			</div>
+		{/if}
+		{#if spec.mineLayingRateByMineType[MinefieldType.SPEED_BUMP]}
+			<div class="flex justify-between">
+				<div class="font-semibold mr-5">Mine Laying</div>
+				<div>{spec.mineLayingRateByMineType[MinefieldType.SPEED_BUMP]} spd/yr</div>
+			</div>
+		{/if}
+		{#if spec.miningRate}
+			<div class="flex justify-between">
+				<div class="font-semibold mr-5">Remote Mining</div>
+				<div>{spec.miningRate}kT/yr</div>
+			</div>
+		{/if}
+	{/if}
+</div>

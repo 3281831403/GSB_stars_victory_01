@@ -1,0 +1,210 @@
+package ai
+
+import (
+	"log/slog"
+	"math"
+
+	"github.com/sirgwain/craig-stars/cs"
+)
+
+// find all colonizable planets and send colony ships to them
+func (ai *aiPlayer) colonize() error {
+	colonizablePlanets := map[int]*cs.Planet{}
+
+	// grab a list of colonizable planets we know we can live on
+	for _, planet := range ai.Player.PlanetIntels {
+		if planet.Explored() && !planet.Owned() && (planet.Spec.Habitability > 0 || planet.Spec.TerraformedHabitability > 0) {
+			colonizablePlanets[planet.Num] = planet
+		}
+	}
+
+	fleetMakeup := ai.fleetsByPurpose[cs.FleetPurposeColonizer]
+
+	// find all idle ships that can be part of our colonizer fleets
+	// and merge them into a single fleet with purpose
+	colonizerFleets, err := ai.assembleFromIdleFleets(fleetMakeup)
+	if err != nil {
+		return err
+	}
+
+	// ai.log.Debug().
+	// 	Msgf("%d colonizer fleets assembled from idle fleets", len(colonizerFleets))
+
+	// TODO: Refactor this for readability's sake
+	for _, fleet := range fleetMakeup.getFleetsMatchingMakeup(ai, ai.Fleets) {
+		if fleet.GetTag(cs.TagPurpose) != string(cs.FleetPurposeColonizer) || !fleet.Spec.Colonizer {
+			// not a colonizer
+			continue
+		}
+		if len(fleet.Waypoints) <= 1 {
+			planet := ai.getPlanet(fleet.OrbitingPlanetNum)
+			if planet != nil && planet.OwnedBy(ai.Player.Num) && planet.Spec.PopulationDensity > ai.config.colonizerPopulationDensity {
+				// this fleet can be sent to colonize a planet
+				colonizerFleets = append(colonizerFleets, fleet)
+			} else if fleet.Cargo.Colonists > 0 {
+				// this fleet already has colonists but the planet its over is probably already
+				// colonized, so send it to a new planet
+				colonizerFleets = append(colonizerFleets, fleet)
+			}
+		} else {
+			// this fleet is already colonizing a planet, remove the target from the colonizable planets list
+			for _, wp := range fleet.Waypoints[1:] {
+				if wp.TargetNum != cs.None {
+					delete(colonizablePlanets, wp.TargetNum)
+				}
+
+				target := ai.GetPlanetIntel(wp.TargetNum)
+				if target.Owned() {
+					// our target is owned by someone else, see if we can invade them
+					// TODO: add defenses to the calcs
+					// and cancel if they have a starbase
+					if ai.IsEnemy(target.PlayerNum) && !target.Spec.HasStarbase && target.GetPopulation() < int(float64(fleet.Cargo.Colonists*100)/ai.config.invasionFactor) {
+						ai.log.Debug("Colonizer switched to invasion",
+							slog.String("fleet", fleet.Name),
+							slog.String("target", target.Name),
+							slog.Int("Invaders", fleet.Cargo.Colonists*100),
+							slog.Int("Defenders", target.GetPopulation()),
+							slog.Bool("HasStarbase", target.Spec.HasStarbase))
+
+						fleet.Purpose = cs.FleetPurposeInvader
+						warpSpeed := fleet.Waypoints[1].WarpSpeed
+						fleet.Waypoints[1] = cs.NewPlanetWaypoint(target.Position, target.Num, target.Name, warpSpeed).
+							WithTask(cs.WaypointTaskTransport).
+							WithTransportTasks(cs.WaypointTransportTasks{Colonists: cs.WaypointTransportTask{Action: cs.TransportActionUnloadAll}})
+					} else {
+						// this planet is owned by someone else and we don't want to invade
+						// remove the target and return this colonizer to the pool
+						fleet.Waypoints = fleet.Waypoints[:1]
+						colonizerFleets = append(colonizerFleets, fleet)
+						ai.log.Debug("Fleet was targeting planet but it is owned by another player",
+							slog.String("fleet", fleet.Name),
+							slog.String("target", target.Name),
+							slog.Int("playerNum", target.PlayerNum))
+
+					}
+					continue
+				}
+			}
+		}
+	}
+
+	// after colonizing, we may have idle fleets leftover
+	idleFleets := len(colonizerFleets)
+	ai.log.Debug("Colonizer fleets and planets",
+		slog.Int("colonizerFleets", idleFleets),
+		slog.Int("colonizablePlanets", len(colonizablePlanets)))
+
+	// Check each of our idle colonizer fleets and have them load dudes
+	for _, fleet := range colonizerFleets {
+		bestPlanet := ai.getBestPlanetToColonize(fleet, colonizablePlanets)
+		if bestPlanet == nil {
+			// bestPlanet is only nil if we don't know any planets we can live on,
+			// so there's no point checking over and over for subsequent fleets
+			break
+		}
+
+		if fleet.OrbitingPlanetNum == cs.None || fleet.Cargo.Total() != 0 {
+			// if our colonizer is out in space or already has cargo, don't try and load more
+			continue
+		}
+
+		// make sure we aren't orbiting another player's planet
+		planet := ai.GetPlanetIntel(fleet.OrbitingPlanetNum)
+		if planet.PlayerNum != ai.Num {
+			continue
+		}
+
+		// don't load more than 100% of the planet cap
+		// TODO: Make this better:
+		// * _Don't_ send colonizers in the first place if we don't need them
+		// * Only load up to a preset % of cap (rather than trying to take everything and aborting if we load too much)
+		// * Also bring some minerals maybe?
+		colonistsToLoad := min(planet.Spec.MaxPopulation/100, fleet.Spec.CargoCapacity)
+
+		// only load colonists if taking them doesn't reduce our pop too much
+		// take into account how much we're going to grow
+		orbiting := ai.getPlanet(fleet.OrbitingPlanetNum)
+		popNextYear := orbiting.PopNextYear()
+		newDensity := float64(popNextYear-colonistsToLoad*100) / float64(orbiting.Spec.MaxPopulation)
+		if newDensity < ai.config.colonizerPopulationDensity {
+			ai.log.Debug("Fleet aborting loading colonists; too little pop",
+				slog.String("fleet", fleet.Name),
+				slog.String("planet", orbiting.Name),
+				slog.Int("ColonistsAvailable", popNextYear),
+				slog.Int("ColonistsNeeded", colonistsToLoad*100),
+				slog.Float64("DensityAfterLoad", newDensity))
+
+			continue
+		}
+
+		if err := ai.client.TransferByHand(&ai.game.Rules, ai.Player, fleet, orbiting, cs.CargoTransferRequest{Cargo: cs.Cargo{Colonists: colonistsToLoad}}); err != nil {
+			// something went wrong, skip this planet
+			ai.log.Error("transferring colonists from planet returned error, skipping", slog.Any("error", err))
+			continue
+		}
+
+		newWpIndex := fleet.AddWaypoint(ai.Player, cs.WaypointDest{MO: bestPlanet.MapObject}, 0, true)
+		if newWpIndex == 0 {
+			ai.log.Warn("Fleet tried to target planet for colonizing but did not add the waypoint",
+				slog.String("fleet", fleet.Name),
+				slog.String("planet", bestPlanet.Name),
+				slog.String("Cargo", fleet.Cargo.PrettyString()),
+				slog.Bool("Colonizer", fleet.Spec.Colonizer),
+				slog.Bool("CanColonize", fleet.CanColonize(bestPlanet)))
+			continue
+		}
+		ai.client.UpdateFleetOrders(ai.Player, fleet, fleet.FleetOrders)
+		delete(colonizablePlanets, bestPlanet.Num)
+		idleFleets--
+
+		ai.log.Debug("Fleet targeting planet for colonizing",
+			slog.String("fleet", fleet.Name),
+			slog.String("planet", bestPlanet.Name),
+			slog.Int("WarpSpeed", fleet.Waypoints[1].WarpSpeed))
+
+	}
+
+	// build colonizer fleets where necessary
+	if len(colonizablePlanets)-idleFleets > 0 {
+		ai.addFleetBuildRequest(cs.FleetPurposeColonizer, len(colonizablePlanets)-idleFleets)
+	}
+	return nil
+}
+
+// get the planet with the best distance to hab ratio
+func (ai *aiPlayer) getBestPlanetToColonize(fleet *cs.Fleet, colonizablePlanets map[int]*cs.Planet) *cs.Planet {
+	var best *cs.Planet = nil
+
+	// lowest weight wins
+	bestWeight := math.MaxFloat64
+	yearlyTravelDistance := float64(fleet.Spec.Engine.IdealSpeed * fleet.Spec.Engine.IdealSpeed)
+
+	for _, intel := range colonizablePlanets {
+		habValue := intel.Spec.Habitability
+		terraformHabValue := intel.Spec.TerraformedHabitability
+		dist := intel.Position.DistanceTo(fleet.Position)
+		yearsToTravel := math.Ceil(dist / yearlyTravelDistance)
+
+		// weight is based on distance (in years) and hab value
+		// as distance goes up, weight goes up. As habValue goes up, weight goes down
+		// low weight wins
+		// distance is weighted heavier than habValue. In the above calc, a 100% planet 10y away is ranked equally with a
+		// 25% planet 5y away
+		weight := math.MaxFloat64
+		if habValue > 0 {
+			weight = (yearsToTravel * yearsToTravel) / float64(habValue)
+		} else if terraformHabValue > 0 {
+			// only colonize terraformable planets if they're really close
+			weight = 2 * (yearsToTravel * yearsToTravel) / float64(terraformHabValue)
+		}
+
+		if weight < bestWeight {
+			bestWeight = weight
+			best = intel
+		}
+	}
+
+	// best = ai.getClosestPlanetIntel(fleet.Position, colonizablePlanets)
+
+	return best
+}

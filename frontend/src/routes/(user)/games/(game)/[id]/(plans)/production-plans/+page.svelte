@@ -1,0 +1,46 @@
+<script lang="ts">
+	import Breadcrumb from '$lib/components/game/Breadcrumb.svelte';
+	import { addError } from '$lib/services/Errors';
+	import { getGameContext } from '$lib/services/GameContext';
+	import type { ProductionPlan } from '$lib/types/cs-proto';
+	import type { ConnectError } from '@connectrpc/connect';
+	import ProductionPlanCard from './ProductionPlanCard.svelte';
+
+	const { game, player, universe, deleteProductionPlan } = getGameContext();
+
+	async function deletePlan(plan: ProductionPlan) {
+		try {
+			await deleteProductionPlan(plan.num);
+			// trigger reactivity
+			$player.playerPlans.productionPlans = $player.playerPlans.productionPlans;
+		} catch (e) {
+			addError(e as ConnectError);
+		}
+	}
+</script>
+
+<Breadcrumb>
+	{#snippet crumbs()}
+		<li>Production Plans</li>
+	{/snippet}
+
+	{#snippet end()}
+		<div class="flex justify-end mb-1">
+			<a class="cs-link btn btn-sm" href={`/games/${$game.id}/production-plans/create`}>Create</a>
+		</div>
+	{/snippet}
+</Breadcrumb>
+
+{#if $player.playerPlans.productionPlans.length}
+	<div class="flex flex-wrap justify-center gap-2">
+		{#each $player.playerPlans.productionPlans as plan (plan.num)}
+			<ProductionPlanCard
+				designFinder={$universe}
+				{plan}
+				href={`/games/${$game.id}/production-plans/${plan.num}`}
+				showDelete={plan.num !== 0}
+				onDelete={() => deletePlan(plan)}
+			/>
+		{/each}
+	</div>
+{/if}

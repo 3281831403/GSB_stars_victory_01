@@ -1,0 +1,186 @@
+package ai
+
+import (
+	"log/slog"
+	"math"
+	"slices"
+
+	"github.com/sirgwain/craig-stars/cs"
+)
+
+// dispatch scouts to unknown planets
+func (ai *aiPlayer) scout() error {
+	unknownPlanetsByNum := map[int]*cs.Planet{}
+
+	// find all the unexplored planets
+	for _, planet := range ai.Player.PlanetIntels {
+		if planet.Unexplored() {
+			unknownPlanetsByNum[planet.Num] = planet
+		}
+	}
+
+	// find all idle fleets that have scanners
+	scannerFleets := []*cs.Fleet{}
+	for _, fleet := range ai.Fleets {
+		if fleet.GetTag(cs.TagPurpose) == string(cs.FleetPurposeScout) && fleet.Spec.Scanner {
+			if len(fleet.Waypoints) <= 1 {
+				// this fleet can be sent to scan a planet
+				scannerFleets = append(scannerFleets, fleet)
+			} else {
+				// this fleet is already scanning a planet, remove the target from the unknown planets list
+				for _, wp := range fleet.Waypoints[1:] {
+					if wp.TargetNum != cs.None {
+						delete(unknownPlanetsByNum, wp.TargetNum)
+
+						target := ai.GetPlanetIntel(wp.TargetNum)
+						if target.ReportAge != cs.ReportAgeUnexplored {
+							ai.log.Debug("Scout no longer targeting planet, it's already explored",
+								slog.String("scout", fleet.Name),
+								slog.String("target", target.Name),
+								slog.Int64("GameID", ai.GameID),
+								slog.Int("PlayerNum", ai.Num))
+
+							// we discovered this target in some other way, change targets
+							fleet.Waypoints = fleet.Waypoints[:1]
+							scannerFleets = append(scannerFleets, fleet)
+							continue
+						}
+					}
+				}
+			}
+		}
+	}
+
+	idleFleets := len(scannerFleets)
+	ai.log.Debug("Scanner fleets and unknown planets",
+		slog.Int("scannerFleets", idleFleets),
+		slog.Int("unknownPlanets", len(unknownPlanetsByNum)),
+		slog.Int64("GameID", ai.GameID),
+		slog.Int("PlayerNum", ai.Num))
+
+	for _, fleet := range scannerFleets {
+		closestPlanet := ai.getClosestPlanetIntel(fleet.Position, unknownPlanetsByNum)
+		if closestPlanet != nil {
+
+			fastest := float64(fleet.Fuel)/float64(fleet.Spec.FuelCapacity) > .5
+			newWpIndex := fleet.AddWaypoint(ai.Player, cs.WaypointDest{MO: closestPlanet.MapObject}, len(fleet.Waypoints)-1, fastest)
+			if newWpIndex == 0 {
+				ai.log.Warn("Fleet tried to target planet for scouting but did not add the waypoint",
+					slog.String("fleet", fleet.Name),
+					slog.String("planet", closestPlanet.Name))
+				continue
+			}
+
+			ai.client.UpdateFleetOrders(ai.Player, fleet, fleet.FleetOrders)
+			delete(unknownPlanetsByNum, closestPlanet.Num)
+			idleFleets--
+
+			ai.log.Debug("Scout targeting planet",
+				slog.String("scout", fleet.Name),
+				slog.String("planet", closestPlanet.Name),
+				slog.Int("WarpSpeed", fleet.Waypoints[newWpIndex].WarpSpeed),
+				slog.Int64("GameID", ai.GameID),
+				slog.Int("PlayerNum", ai.Num))
+		}
+	}
+
+	// build scout ships where necessary
+	if len(unknownPlanetsByNum)-idleFleets > 0 {
+		ai.addFleetBuildRequest(cs.FleetPurposeScout, len(unknownPlanetsByNum)-idleFleets)
+	}
+
+	return nil
+}
+
+// fling packets at planets to scout
+func (ai *aiPlayer) scoutPackets() error {
+	if !ai.Player.Race.Spec.PacketBuiltInScanner {
+		return nil
+	}
+	unknownPlanetsByNum := map[int]*cs.Planet{}
+
+	// find all the unexplored planets
+	for _, planet := range ai.Player.PlanetIntels {
+		if planet.Unexplored() {
+			unknownPlanetsByNum[planet.Num] = planet
+		}
+	}
+
+	// remove any planets we're already targetting
+	for _, packet := range ai.MineralPackets {
+		// this packet travels along a path to the target
+		// build a rectangle in the shape of the scan path
+		//
+		angle := math.Atan2(packet.Heading.Y, packet.Heading.X)
+		target := ai.GetPlanetIntel(packet.TargetPlanetNum)
+		dist := packet.Position.DistanceTo(target.Position)
+
+		// the rectangle is the height of the scan range and the width of the distance
+		// from the packet to the target
+		// i.e
+		// rect origin is upper left corner
+		//          *-------------
+		// packet    |           |  target
+		// (x,y)    *|>>>>>>>>>>>|* (x, y)
+		//           |           |
+		//           -------------
+		height := packet.ScanRangePen * 2
+		width := dist
+		rect := cs.Rect{X: packet.Position.X, Y: packet.Position.Y - height/2, Width: int(width), Height: height}
+		for num, planet := range unknownPlanetsByNum {
+			// we will catch this in our scanners, remove it
+			if rect.PointInRotatedRectangle(planet.Position, angle) {
+				delete(unknownPlanetsByNum, num)
+			}
+		}
+		delete(unknownPlanetsByNum, packet.TargetPlanetNum)
+	}
+
+	for _, planet := range ai.Planets {
+		if !planet.Spec.HasMassDriver {
+			continue
+		}
+		existingQueueItemIndex := slices.IndexFunc(planet.ProductionQueue, func(item cs.ProductionQueueItem) bool { return item.Type.IsPacket() })
+		if existingQueueItemIndex != -1 {
+			// already has packet in queue; move on to next planet
+			continue
+		}
+
+		// find the farthest planet
+		farthest := ai.getFarthestPlanetIntel(planet.Position, unknownPlanetsByNum)
+		if farthest == nil {
+			continue
+		}
+
+		// fling a packet with the mineral we have the largest amount of
+		highestType, _ := planet.Cargo.ToMineral().HighestType(1)
+		queueItemType := cs.QueueItemTypeMixedMineralPacket
+		switch highestType {
+		case cs.Ironium:
+			queueItemType = cs.QueueItemTypeIroniumMineralPacket
+		case cs.Boranium:
+			queueItemType = cs.QueueItemTypeBoraniumMineralPacket
+		case cs.Germanium:
+			queueItemType = cs.QueueItemTypeGermaniumMineralPacket
+		}
+
+		// Build a new packet targeted towards this planet
+		// TODO: Make sure it adds enough minerals to kill the planet
+		planet.PacketTargetNum = farthest.Num
+		planet.ProductionQueue = append([]cs.ProductionQueueItem{{Type: queueItemType, Quantity: 1}}, planet.ProductionQueue...)
+		delete(unknownPlanetsByNum, farthest.Num)
+
+		if err := ai.client.UpdatePlanetOrders(&ai.game.Rules, ai.Player, planet, planet.PlanetOrders); err != nil {
+			return err
+		}
+
+		ai.log.Debug("Planet is sending a scout packet",
+			slog.String("planet", planet.Name),
+			slog.String("target", farthest.Name),
+			slog.Int("WarpSpeed", planet.PacketSpeed),
+			slog.Int64("GameID", ai.GameID),
+			slog.Int("PlayerNum", ai.Num))
+
+	}
+	return nil
+}

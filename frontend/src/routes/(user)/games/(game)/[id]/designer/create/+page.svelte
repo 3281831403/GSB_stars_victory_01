@@ -1,0 +1,39 @@
+<script lang="ts">
+	import Breadcrumb from '$lib/components/game/Breadcrumb.svelte';
+	import TechAvatar from '$lib/components/tech/TechAvatar.svelte';
+	import { getGameContext } from '$lib/services/GameContext';
+	import { techs } from '$lib/services/Stores';
+	import { canLearnTech } from '$lib/types/Player';
+	import { hasRequiredLevels } from '$lib/types/TechLevel';
+	import { kebabCase } from 'lodash-es';
+
+	const { game, player } = getGameContext();
+</script>
+
+<Breadcrumb>
+	{#snippet crumbs()}
+		<li><a class="cs-link" href={`/games/${$game.id}/designer`}>Ship Designs</a></li>
+		<li>Choose Hull</li>
+	{/snippet}
+</Breadcrumb>
+<ul class="px-1">
+	{#each $techs.hulls as hull (hull.tech?.name)}
+		{#if canLearnTech($player, hull) && hasRequiredLevels($player.techLevels, hull.tech?.requirements?.techLevel)}
+			<li>
+				<a
+					class="cs-link"
+					href={`/games/${$game.id}/designer/create/${kebabCase(hull.tech?.name)}`}
+				>
+					<div class="flex flex-row place-items-center">
+						<div class="mr-2 mb-2 border border-secondary bg-black p-1">
+							<TechAvatar tech={hull} />
+						</div>
+						<div>
+							{hull.tech?.name}
+						</div>
+					</div>
+				</a>
+			</li>
+		{/if}
+	{/each}
+</ul>

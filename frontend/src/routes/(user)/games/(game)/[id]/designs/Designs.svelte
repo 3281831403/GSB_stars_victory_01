@@ -1,0 +1,174 @@
+<script lang="ts">
+	import BattleSpeed from '$lib/components/game/BattleSpeed.svelte';
+	import { onShipDesignTooltip } from '$lib/components/game/tooltips/ShipDesignTooltip';
+	import { onTechTooltip } from '$lib/components/game/tooltips/TechTooltip';
+	import SortableTableHeader from '$lib/components/table/SortableTableHeader.svelte';
+	import Table from '$lib/components/table/Table.svelte';
+	import type { TableColumn } from '$lib/components/table/Table';
+	import TableSearchInput from '$lib/components/table/TableSearchInput.svelte';
+	import { getGameContext } from '$lib/services/GameContext';
+	import { techs } from '$lib/services/Stores';
+	import { getHullIcon } from '$lib/techicon';
+	import type { ShipDesign } from '$lib/types/cs-proto';
+	import { getDisplayColor } from '$lib/utils/colorUtils';
+	import { QuestionMarkCircle } from '@steeze-ui/heroicons';
+	import { Icon } from '@steeze-ui/svelte-icon';
+
+	const { game, player, universe, settings } = getGameContext();
+
+	type Props = {
+		designs: ShipDesign[];
+	};
+
+	let { designs }: Props = $props();
+
+	// filterable designs
+	let search = $state('');
+	let filteredDesigns: ShipDesign[] = $derived(
+		designs
+			.sort((a, b) => (a.playerNum != b.playerNum ? a.playerNum - b.playerNum : a.num - b.num))
+			.filter(
+				(i) =>
+					i.name.toLowerCase().indexOf(search.toLowerCase()) != -1 ||
+					i.hull.toLowerCase().indexOf(search.toLowerCase()) != -1 ||
+					$universe.getPlayerPluralName(i.playerNum).toLowerCase().indexOf(search.toLowerCase()) !=
+						-1
+			)
+	);
+
+	type TableShipDesign = ShipDesign & {
+		rating?: never;
+		armor?: never;
+		shields?: never;
+		initiative?: never;
+		movement?: never;
+		mass?: never;
+	};
+	const columns: TableColumn<TableShipDesign>[] = [
+		{
+			key: 'playerNum',
+			title: 'Player'
+		},
+		{
+			key: 'num',
+			title: 'ID'
+		},
+		{
+			key: 'name',
+			title: 'Name'
+		},
+		{
+			key: 'hull',
+			title: 'Hull'
+		},
+		{
+			key: 'rating',
+			title: 'Rating',
+			sortBy: (a, b) => (a.spec?.powerRating ?? 0) - (b.spec?.powerRating ?? 0)
+		},
+		{
+			key: 'armor',
+			title: 'Armor',
+			sortBy: (a, b) => (a.spec?.armor ?? 0) - (b.spec?.armor ?? 0)
+		},
+		{
+			key: 'shields',
+			title: 'Shields',
+			sortBy: (a, b) => (a.spec?.shields ?? 0) - (b.spec?.shields ?? 0)
+		},
+		{
+			key: 'initiative',
+			title: 'Initiative',
+			sortBy: (a, b) => (a.spec?.initiative ?? 0) - (b.spec?.initiative ?? 0)
+		},
+		{
+			key: 'movement',
+			title: 'Movement',
+			sortBy: (a, b) => (a.spec?.movement ?? 0) - (b.spec?.movement ?? 0)
+		},
+		{
+			key: 'mass',
+			title: 'Mass',
+			sortBy: (a, b) => (a.spec?.mass ?? 0) - (b.spec?.mass ?? 0)
+		}
+	];
+</script>
+
+<div class="w-full">
+	<div class="flex flex-row justify-between m-2">
+		<TableSearchInput bind:value={search} />
+	</div>
+	<Table
+		{columns}
+		rows={filteredDesigns}
+		classes={{
+			table: 'table table-zebra table-compact table-auto w-full',
+			th: 'sticky top-0 bg-base-200 z-10'
+		}}
+	>
+		{#snippet head({ isSorted, sortDescending, column })}
+			<span>
+				<SortableTableHeader {column} {isSorted} {sortDescending} />
+			</span>
+		{/snippet}
+
+		{#snippet cell({ column, row, cell })}
+			<span>
+				{#if column.key === 'name'}
+					<div class="flex flex-row">
+						<button
+							class="w-full h-full cursor-help text-left"
+							aria-label="Opens ship design visual"
+							onpointerdown={(e) => onShipDesignTooltip(e, row)}
+						>
+							<div class="avatar mr-2">
+								<div
+									class="border-2 border-neutral p-2 bg-black"
+									style={`border-color: ${getDisplayColor(row.playerNum, $player, $universe, $settings)};`}
+								>
+									<div class="fleet-avatar {getHullIcon(row)} bg-black"></div>
+								</div>
+							</div>
+						</button>
+						<div class="text-left w-full my-auto">
+							<a href={`/games/${$game.id}/designs/${row.playerNum}/${row.num}`} class="cs-link">
+								{cell}
+							</a>
+						</div>
+					</div>
+				{:else if column.key === 'num'}
+					{#if row.playerNum === $player.num}
+						<a href={`/games/${$game.id}/designer/${row.num}`} class="cs-link">{cell}</a>
+					{:else}
+						{cell}
+					{/if}
+				{:else if column.key === 'playerNum'}
+					<a href={`/games/${$game.id}/designs/${row.playerNum}`} class="cs-link">
+						{$universe.getPlayerPluralName(row.playerNum)}
+					</a>
+				{:else if column.key === 'mass'}
+					{row.spec?.mass ?? ''}
+				{:else if column.key === 'armor'}
+					{row.spec?.armor ?? ''}
+				{:else if column.key === 'shields'}
+					{row.spec?.shields ?? ''}
+				{:else if column.key === 'rating'}
+					{row.spec?.powerRating ?? ''}
+				{:else if column.key === 'initiative'}
+					{row.spec?.initiative ?? ''}
+				{:else if column.key === 'movement'}
+					<BattleSpeed speed={row.spec?.movement ?? 0}></BattleSpeed>
+				{:else if column.key === 'hull'}
+					<button
+						class="w-full h-full cursor-help text-left"
+						onpointerdown={(e) => onTechTooltip(e, $techs.getTech(row.hull))}
+						>{cell}
+						<Icon src={QuestionMarkCircle} size="16" class=" cursor-help inline-block" /></button
+					>
+				{:else}
+					{cell}
+				{/if}
+			</span>
+		{/snippet}
+	</Table>
+</div>

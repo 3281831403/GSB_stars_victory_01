@@ -1,0 +1,21 @@
+<script lang="ts">
+	import { page } from '$app/state';
+	import { getGameContext } from '$lib/services/GameContext';
+	import { ownedBy } from '$lib/types/MapObject';
+	import { onMount } from 'svelte';
+	import ProductionQueue from '../../../dialogs/production/ProductionQueue.svelte';
+
+	const { player, universe, commandedPlanet, commandMapObject } = getGameContext();
+	let num = parseInt(page.params.num || '0');
+
+	onMount(() => {
+		const planet = $universe.getPlanet(num);
+		if (planet && ownedBy(planet, $player.num)) {
+			commandMapObject(planet);
+		}
+	});
+</script>
+
+{#if $commandedPlanet}
+	<ProductionQueue planet={$commandedPlanet} />
+{/if}
