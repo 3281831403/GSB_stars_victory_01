@@ -335,7 +335,12 @@ func (g *Game) WithSettings(settings GameSettings) *Game {
 	g.MaxMinerals = settings.MaxMinerals
 	g.GalaxyClumping = settings.GalaxyClumping
 	g.StartMode = settings.StartMode
-	g.VictoryConditions = settings.VictoryConditions
+
+	// only override the default victory conditions if the settings specify them,
+	// otherwise a game created without victory conditions could never be won
+	if settings.VictoryConditions.Conditions != VictoryConditionNone {
+		g.VictoryConditions = settings.VictoryConditions
+	}
 
 	// use custom rules for this game
 	if settings.Rules != nil {
