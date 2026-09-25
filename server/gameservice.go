@@ -43,6 +43,12 @@ func (s *gameService) CreateGame(ctx context.Context, req *connect.Request[craig
 	// Convert proto settings to CS settings
 	settings := converter.C.ConvertGameSettings(req.Msg.Settings)
 
+	// use the default victory conditions if the request didn't specify any,
+	// so games created through this interface can be won like any other game
+	if req.Msg.Settings == nil || req.Msg.Settings.VictoryConditions == nil {
+		settings.VictoryConditions = cs.NewGameSettings().VictoryConditions
+	}
+
 	// make sure guests don't create multiplayer games
 	if user.isGuest() && !settings.IsSinglePlayer() {
 		return nil, connect.NewError(connect.CodePermissionDenied, errors.New("guests cannot host multiplayer games"))
