@@ -3,12 +3,15 @@ package cs
 import (
 	"fmt"
 	"math"
+	"slices"
+	"strings"
 )
 
 // The CostCalculator interface is used to calculate costs of single items or starbase upgrades
 // This is used by planetary production and estimating production queue completion
 type CostCalculator interface {
 	StarbaseUpgradeCost(rules *Rules, techLevels TechLevel, raceSpec RaceSpec, design, newDesign *ShipDesign) (Cost, error)
+	StarbaseRepairCost(rules *Rules, techLevels TechLevel, raceSpec RaceSpec, design *ShipDesign, damage float64) (Cost, error)
 	CostOfOne(player *Player, item ProductionQueueItem) (Cost, error)
 	GetDesignCost(rules *Rules, techLevels TechLevel, raceSpec RaceSpec, design *ShipDesign) (Cost, error)
 	GetTechCost(rules *Rules, techLevels TechLevel, raceSpec RaceSpec, tech Tech) Cost
@@ -151,7 +154,7 @@ func (c *costCalculate) StarbaseUpgradeCost(rules *Rules, techLevels TechLevel, 
 		}
 		if i < len(newDesign.Slots) {
 			hc := rules.techs.GetHullComponent(newDesign.Slots[i].HullComponent)
-			if hc == nil && design.Slots[i].HullComponent != "" {
+			if hc == nil && newDesign.Slots[i].HullComponent != "" {
 				return Cost{}, fmt.Errorf("component %q of new design was not found in tech store", newDesign.Slots[i].HullComponent)
 			}
 			newComponents[hc] += newDesign.Slots[i].Quantity
@@ -187,7 +190,8 @@ func (c *costCalculate) StarbaseUpgradeCost(rules *Rules, techLevels TechLevel, 
 	if len(oldComponents) == 0 {
 		// every item in our old base is also present in the new one;
 		// we can just tally up all our costs for the new stuff and be done for the day
-		for item, leftoverQty := range newComponents {
+		for _, item := range sortedComponentsByName(newComponents) {
+			leftoverQty := newComponents[item]
 			if item.Tech.Category == TechCategoryOrbital {
 				cost = cost.Add(MultiplyCost(getItemCost(item.Tech), leftoverQty))
 			} else {
@@ -212,18 +216,29 @@ func (c *costCalculate) StarbaseUpgradeCost(rules *Rules, techLevels TechLevel, 
 	// Now, all that's left to do are the cost calcs!
 
 	// Tally up costs per category present on either base
+	// iterate categories and components in sorted order so the float
+	// accumulation below is deterministic regardless of map hash order
+	sortedCategories := make([]TechCategory, 0, len(categories))
 	for category := range categories {
+		sortedCategories = append(sortedCategories, category)
+	}
+	slices.Sort(sortedCategories)
+	for _, category := range sortedCategories {
 		oldCost := CostFloat64{}
 		newCost := CostFloat64{}
 
-		for _, oldItem := range oldComponentsByCategory[category] {
+		oldItems := oldComponentsByCategory[category]
+		sortComponentsByName(oldItems)
+		for _, oldItem := range oldItems {
 			if category == TechCategoryOrbital {
 				oldCost = oldCost.Add(MultiplyCost(getItemCost(oldItem.Tech), oldComponents[oldItem]))
 			} else {
 				oldCost = oldCost.Add(MultiplyCost(getItemCost(oldItem.Tech), float64(oldComponents[oldItem])*rules.StarbaseComponentCostReduction))
 			}
 		}
-		for _, newItem := range newComponentsByCategory[category] {
+		newItems := newComponentsByCategory[category]
+		sortComponentsByName(newItems)
+		for _, newItem := range newItems {
 			if category == TechCategoryOrbital {
 				newCost = newCost.Add(MultiplyCost(getItemCost(newItem.Tech), newComponents[newItem]))
 			} else {
@@ -245,6 +260,51 @@ func (c *costCalculate) StarbaseUpgradeCost(rules *Rules, techLevels TechLevel, 
 	}
 
 	return MultiplyCost(cost.Max(minCost), raceSpec.StarbaseCostFactor).Round(math.Ceil).ToCost().MinZero(), nil
+}
+
+// sort hull components by name (and category as a tiebreaker) for deterministic iteration
+func sortComponentsByName(components []*TechHullComponent) {
+	slices.SortFunc(components, func(a, b *TechHullComponent) int {
+		if c := strings.Compare(a.Tech.Name, b.Tech.Name); c != 0 {
+			return c
+		}
+		return strings.Compare(string(a.Tech.Category), string(b.Tech.Category))
+	})
+}
+
+// return the keys of a component quantity map sorted by name for deterministic iteration
+func sortedComponentsByName(components map[*TechHullComponent]int) []*TechHullComponent {
+	sorted := make([]*TechHullComponent, 0, len(components))
+	for item := range components {
+		sorted = append(sorted, item)
+	}
+	sortComponentsByName(sorted)
+	return sorted
+}
+
+// Calculate the cost to repair a damaged starbase of the given design
+//
+// The repair cost scales linearly with the fraction of armor damaged,
+// i.e. a starbase at 50% damage costs half its full build cost to repair
+func (c *costCalculate) StarbaseRepairCost(rules *Rules, techLevels TechLevel, raceSpec RaceSpec, design *ShipDesign, damage float64) (Cost, error) {
+	if damage <= 0 {
+		// no damage, nothing to repair
+		return Cost{}, nil
+	}
+	if design == nil {
+		return Cost{}, fmt.Errorf("cannot compute repair cost for a nil starbase design")
+	}
+	fullCost, err := c.GetDesignCost(rules, techLevels, raceSpec, design)
+	if err != nil {
+		return Cost{}, fmt.Errorf("failed to compute starbase repair cost: %w", err)
+	}
+	armor := design.Spec.Armor
+	if armor <= 0 {
+		return Cost{}, fmt.Errorf("starbase design %q has no armor to repair", design.Name)
+	}
+	// cap the damage fraction at 100% so overkill damage doesn't inflate the cost
+	repairFraction := min(1, damage/float64(armor))
+	return MultiplyCost(fullCost.ToCostFloat64(), repairFraction).Round(math.Ceil).ToCost().MinZero(), nil
 }
 
 // Get the cost of one item in a production queue, for a player

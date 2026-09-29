@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"slices"
 )
 
 // The producer interface performs planetary production
@@ -178,9 +179,32 @@ type builtShip struct {
 }
 
 // produce all items in the production queue
-func (p *producer) produce() (productionResult, error) {
+func (p *producer) produce() (result productionResult, err error) {
 	planet := p.planet
-	result := productionResult{}
+
+	// snapshot the mutable planet state up front so any failure below
+	// rolls back atomically, leaving cargo, installations, terraforming
+	// and the production queue exactly as they were before the call
+	snapshotCargo := planet.Cargo
+	snapshotQueue := slices.Clone(planet.ProductionQueue)
+	snapshotMines := planet.Mines
+	snapshotFactories := planet.Factories
+	snapshotDefenses := planet.Defenses
+	snapshotScanner := planet.Scanner
+	snapshotHab := planet.Hab
+	defer func() {
+		if err != nil {
+			planet.Cargo = snapshotCargo
+			planet.ProductionQueue = snapshotQueue
+			planet.Mines = snapshotMines
+			planet.Factories = snapshotFactories
+			planet.Defenses = snapshotDefenses
+			planet.Scanner = snapshotScanner
+			planet.Hab = snapshotHab
+			result = productionResult{}
+		}
+	}()
+
 	available := Cost{Resources: planet.Spec.ResourcesPerYearAvailable}.AddMineral(planet.Cargo.ToMineral())
 	newQueue := []ProductionQueueItem{}
 	for itemIndex, item := range planet.ProductionQueue {
@@ -341,9 +365,19 @@ func (p *producer) getItemCost(rules *Rules, player *Player, planet *Planet, ite
 	var err error
 	var cost Cost
 	if item.Type == QueueItemTypeStarbase && planet.Spec.HasStarbase {
-		cost, err = costCalculator.StarbaseUpgradeCost(rules, player.TechLevels, player.Race.Spec, planet.Starbase.Tokens[0].design, item.design)
+		token := planet.Starbase.Tokens[0]
+		cost, err = costCalculator.StarbaseUpgradeCost(rules, player.TechLevels, player.Race.Spec, token.design, item.design)
 		if err != nil {
 			return Cost{}, fmt.Errorf("failed to compute starbase upgrade cost: %w", err)
+		}
+		if token.QuantityDamaged > 0 && token.Damage > 0 {
+			// a damaged starbase must be repaired as part of the upgrade,
+			// so damaged bases can't be upgraded at a discount
+			repairCost, err := costCalculator.StarbaseRepairCost(rules, player.TechLevels, player.Race.Spec, token.design, token.Damage)
+			if err != nil {
+				return Cost{}, fmt.Errorf("failed to compute starbase repair cost: %w", err)
+			}
+			cost = cost.Add(repairCost)
 		}
 	} else if item.Type == QueueItemTypeStarbase || item.Type == QueueItemTypeShipToken {
 		cost, err = costCalculator.GetDesignCost(rules, player.TechLevels, player.Race.Spec, item.design)
