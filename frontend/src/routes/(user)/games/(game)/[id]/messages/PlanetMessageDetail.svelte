@@ -219,8 +219,7 @@
 			{$universe.getPlayerName(invasion.attackerPlayerNum)}'s {invasion.fleetName ||
 				'multiple fleets'} have successfully invaded {planet.mapObject?.name} and wrested it from your
 			control. Your colonists managed to defeat {invasion.attackersKilled} of their invaders before being
-			overrun. Your troops beaming down from {invasion.fleetName || 'multiple fleets'} have successfully
-			wrested
+			overrun.
 		{:else}
 			{$universe.getPlayerName(invasion.attackerPlayerNum)}'s {invasion.fleetName ||
 				'multiple fleets'} tried to invade {planet.mapObject?.name}, but your troops were able to
