@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"math"
 	"slices"
+	"strings"
+	"unicode"
 )
 
 // warpspeed for using a stargate vs moving with warp drive
@@ -371,8 +373,52 @@ func (f *Fleet) Idle() bool {
 	return len(f.Waypoints) == 1 && f.Waypoints[0].Task == WaypointTaskNone
 }
 
-func (f *Fleet) Rename(name string) {
+// MaxFleetNameLength is the maximum length, in characters, of a user supplied fleet name
+const MaxFleetNameLength = 32
+
+// ValidateFleetName returns an error if a user supplied fleet name is invalid.
+// A fleet's Num is its unique identity; the name is display only and must never
+// be used to match fleets.
+func ValidateFleetName(name string) error {
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("fleet name cannot be empty")
+	}
+	if len([]rune(name)) > MaxFleetNameLength {
+		return fmt.Errorf("fleet name cannot be longer than %d characters", MaxFleetNameLength)
+	}
+	for _, r := range name {
+		if !unicode.IsPrint(r) {
+			return fmt.Errorf("fleet name contains invalid character %q", r)
+		}
+	}
+	return nil
+}
+
+// Rename gives this fleet a new user supplied display name. The fleet's Num is its
+// unique identity and is never changed by a rename, nor is it written into the new
+// name. Rename is atomic: if the new name is invalid or the fleet can no longer be
+// renamed, an error is returned and the fleet is left completely unchanged.
+func (f *Fleet) Rename(name string) error {
+	if f.Delete {
+		return fmt.Errorf("cannot rename a deleted fleet")
+	}
+	if err := ValidateFleetName(name); err != nil {
+		return err
+	}
+	if name == f.BaseName {
+		// renaming to the same name is a successful no-op
+		return nil
+	}
 	f.BaseName = name
+	f.Name = name
+	return nil
+}
+
+// ResetBaseName sets a new BaseName for this fleet and derives the default display
+// Name for it, including the fleet's unique Num. This is used when a fleet gains a
+// new identity (creation, transfer to a new owner) rather than a user supplied name.
+func (f *Fleet) ResetBaseName(baseName string) {
+	f.BaseName = baseName
 	f.Name = fmt.Sprintf("%s #%d", f.BaseName, f.Num)
 }
 

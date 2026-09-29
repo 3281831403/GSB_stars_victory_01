@@ -2685,7 +2685,9 @@ func (t *turnGenerator) fleetTransferOwner() {
 			messager.fleetTransferGiven(player, fleet, targetPlayer)
 			messager.fleetTransferReceived(targetPlayer, fleet, player)
 
-			fleet.Rename(fmt.Sprintf("%s %s", player.Race.PluralName, fleet.BaseName))
+			// the fleet gains a new identity (new owner, new Num), so give it a
+			// default display name derived from its new BaseName and Num
+			fleet.ResetBaseName(fmt.Sprintf("%s %s", player.Race.PluralName, fleet.BaseName))
 
 		}
 	}

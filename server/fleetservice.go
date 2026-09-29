@@ -158,12 +158,21 @@ func (s *fleetService) RenameFleet(ctx context.Context, req *connect.Request[cra
 		return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("player doesn't own fleet"))
 	}
 
-	// Update fleet name
-	fleet.BaseName = req.Msg.Name
-	fleet.Name = fmt.Sprintf("%s #%d", req.Msg.Name, fleet.Num)
+	// validate the new name before changing anything
+	if err := cs.ValidateFleetName(req.Msg.Name); err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+	}
+
+	// Update fleet name, keeping a snapshot so a failed save rolls back with zero changes
+	oldBaseName, oldName := fleet.BaseName, fleet.Name
+	if err := fleet.Rename(req.Msg.Name); err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+	}
 
 	// Save the fleet
 	if err := dbWriteClient.SaveFleet(ctx, fleet); err != nil {
+		// roll back the rename so the fleet identity and all references stay consistent
+		fleet.BaseName, fleet.Name = oldBaseName, oldName
 		slog.Error("update fleet in database", slog.Any("error", err), slog.Int64("ID", fleet.ID))
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}

@@ -106,7 +106,8 @@ func (f *fleet) mergeFromIdleFleets(ai *aiPlayer, fleets []*cs.Fleet) (fleet *cs
 		}
 
 		// rename this fleet based on our purpose
-		fleet.Rename(ai.fleetName(fleet, f.purpose))
+		// ai generated names are valid by construction; an invalid name leaves the fleet unchanged
+		_ = fleet.Rename(ai.fleetName(fleet, f.purpose))
 
 		return fleet, remainingFleets, nil
 	}
